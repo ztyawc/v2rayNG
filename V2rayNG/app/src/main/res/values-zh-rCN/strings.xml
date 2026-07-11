@@ -35,6 +35,7 @@
     <string name="menu_item_import_config_manually_vless">添加 [VLESS]</string>
     <string name="menu_item_import_config_manually_ss">添加 [Shadowsocks]</string>
     <string name="menu_item_import_config_manually_socks">添加 [SOCKS]</string>
+    <string name="menu_item_import_config_manually_private_socks">添加 [私有 SOCKS]</string>
     <string name="menu_item_import_config_manually_http">添加 [HTTP]</string>
     <string name="menu_item_import_config_manually_trojan">添加 [Trojan]</string>
     <string name="menu_item_import_config_manually_wireguard">添加 [Wireguard]</string>
@@ -78,6 +79,17 @@
     <string name="server_lab_security3">加密方式</string>
     <string name="server_lab_id4">密码 (可选)</string>
     <string name="server_lab_security4">用户名 (可选)</string>
+    <string name="server_private_socks">私有 SOCKS</string>
+    <string name="server_lab_cmcc_username">用户名</string>
+    <string name="server_lab_cmcc_password">密码</string>
+    <string name="server_lab_cmcc_protocol">认证模式</string>
+    <string name="server_lab_http_headers">自定义 HTTP 请求头</string>
+    <string name="server_lab_http_headers_hint">每行一个：名称: 值</string>
+    <string name="server_lab_http_headers_invalid">第 %1$d 行 HTTP 请求头无效：%2$s</string>
+    <string name="server_lab_http_headers_missing_colon">缺少冒号</string>
+    <string name="server_lab_http_headers_invalid_name">请求头名称无效</string>
+    <string name="server_lab_http_headers_invalid_value">请求头值无效</string>
+    <string name="server_lab_http_headers_duplicate_name">请求头名称重复</string>
     <string name="server_lab_encryption">加密方式 (encryption)</string>
     <string name="server_lab_flow">流控 (flow)</string>
     <string name="server_lab_public_key">PublicKey</string>

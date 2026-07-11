@@ -314,6 +314,11 @@ class MainActivity : HelperBaseActivity(), NavigationView.OnNavigationItemSelect
             true
         }
 
+        R.id.import_manually_private_socks -> {
+            importManually(EConfigType.PRIVATE_SOCKS.value)
+            true
+        }
+
         R.id.import_manually_http -> {
             importManually(EConfigType.HTTP.value)
             true

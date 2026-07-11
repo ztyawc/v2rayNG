@@ -21,6 +21,11 @@
         <item>2022-blake3-chacha20-poly1305</item>
     </string-array>
 
+    <string-array name="cmcc_protocols" translatable="false">
+        <item>0x80</item>
+        <item>0x82</item>
+    </string-array>
+
     <string-array name="networks" translatable="false">
         <item>tcp</item>
         <item>kcp</item>

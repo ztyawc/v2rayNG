@@ -1,0 +1,191 @@
+name: Propose upstream sync
+
+on:
+  schedule:
+    # GitHub may delay scheduled jobs at the top of an hour, so use an offset.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Trusted 2dust/v2rayNG branch to fetch"
+        required: false
+        default: "master"
+        type: string
+      dry_run:
+        description: "Fetch and compare only; do not push a branch or open a pull request"
+        required: false
+        default: false
+        type: boolean
+
+# The token is scoped to this job and is used only to push a new review branch
+# in this fork and to open its pull request.  No PAT or third-party token is used.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: propose-upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  # Keep this immutable in the workflow.  Do not turn the upstream repository
+  # into a workflow input: that would allow an unreviewed source to be merged.
+  UPSTREAM_REPOSITORY: 2dust/v2rayNG
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+  BASE_BRANCH: ${{ github.event.repository.default_branch }}
+
+jobs:
+  propose:
+    # This workflow is intended for a fork.  It intentionally does nothing if
+    # it is ever present in the official repository.
+    if: github.repository != '2dust/v2rayNG'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out this fork's default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Fetch and compare the trusted upstream branch
+        id: inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$BASE_BRANCH" ]]; then
+            echo "::error::GitHub did not provide a default branch for this repository."
+            exit 1
+          fi
+
+          # This accepts a deliberately conservative subset of legal branch
+          # names before it is used in a fetch refspec. The repository URL
+          # itself is a fixed value above.
+          if [[ ! "$UPSTREAM_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+            || ! git check-ref-format --branch "$UPSTREAM_REF" >/dev/null; then
+            echo "::error::Invalid upstream branch: $UPSTREAM_REF"
+            exit 1
+          fi
+
+          git fetch --no-tags origin \
+            "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+          git switch --detach "origin/$BASE_BRANCH"
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/$UPSTREAM_REPOSITORY.git"
+          git fetch --no-tags --prune upstream \
+            "+refs/heads/$UPSTREAM_REF:refs/remotes/upstream/$UPSTREAM_REF"
+
+          upstream_sha="$(git rev-parse "upstream/$UPSTREAM_REF")"
+          base_sha="$(git rev-parse HEAD)"
+          read -r ahead behind < <(git rev-list --left-right --count "HEAD...upstream/$UPSTREAM_REF")
+
+          {
+            echo "base_sha=$base_sha"
+            echo "upstream_sha=$upstream_sha"
+            echo "ahead=$ahead"
+            echo "behind=$behind"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$behind" == "0" ]]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::This fork's $BASE_BRANCH already contains $UPSTREAM_REPOSITORY/$UPSTREAM_REF."
+            exit 0
+          fi
+
+          short_sha="${upstream_sha:0:12}"
+          sync_branch="sync/upstream-$UPSTREAM_REF-$short_sha"
+          {
+            echo "has_changes=true"
+            echo "sync_branch=$sync_branch"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::Found $behind upstream commit(s) not yet in $BASE_BRANCH."
+
+      - name: Report dry-run result
+        if: github.event.inputs.dry_run == 'true'
+        env:
+          HAS_CHANGES: ${{ steps.inspect.outputs.has_changes }}
+          SYNC_BRANCH: ${{ steps.inspect.outputs.sync_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$HAS_CHANGES" == "true" ]]; then
+            echo "Dry run: would propose $SYNC_BRANCH"
+          else
+            echo "Dry run: no upstream changes to propose."
+          fi
+
+      - name: Reserve a new review branch name
+        id: reserve_branch
+        if: steps.inspect.outputs.has_changes == 'true' && github.event.inputs.dry_run != 'true'
+        env:
+          SYNC_BRANCH: ${{ steps.inspect.outputs.sync_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sync_branch="$SYNC_BRANCH"
+
+          # The branch name includes the immutable upstream commit ID.  Never
+          # overwrite it: an existing branch may be under human review.
+          if git ls-remote --exit-code --heads origin "refs/heads/$sync_branch" >/dev/null; then
+            echo "create_branch=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Review branch $sync_branch already exists; leaving it untouched."
+          else
+            echo "create_branch=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create a merge commit for review
+        id: merge
+        if: steps.reserve_branch.outputs.create_branch == 'true'
+        env:
+          SYNC_BRANCH: ${{ steps.inspect.outputs.sync_branch }}
+          UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sync_branch="$SYNC_BRANCH"
+          upstream_sha="$UPSTREAM_SHA"
+
+          git switch --create "$sync_branch"
+          if ! git merge --no-ff --no-commit "upstream/$UPSTREAM_REF"; then
+            git merge --abort || true
+            echo "::error title=Upstream sync needs a manual merge::No branch was pushed; resolve this conflict locally and open a normal pull request."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --no-verify -m "chore(sync): merge $UPSTREAM_REPOSITORY@$upstream_sha"
+          git push origin "HEAD:refs/heads/$sync_branch"
+          echo "merge_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Open a review pull request
+        if: steps.merge.outputs.merge_commit != ''
+        env:
+          # GitHub supplies and masks this short-lived token.  It is never
+          # printed or written to the repository.
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.inspect.outputs.sync_branch }}
+          UPSTREAM_SHA: ${{ steps.inspect.outputs.upstream_sha }}
+          COMMIT_COUNT: ${{ steps.inspect.outputs.behind }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sync_branch="$SYNC_BRANCH"
+          upstream_sha="$UPSTREAM_SHA"
+          commit_count="$COMMIT_COUNT"
+          title="chore(sync): merge upstream $UPSTREAM_REF @ ${upstream_sha:0:12}"
+          body="$(printf '%s\n\n%s\n%s\n%s\n\n%s' \
+            'This pull request was created by the scheduled upstream-sync workflow.' \
+            "- Upstream: \`$UPSTREAM_REPOSITORY\` branch \`$UPSTREAM_REF\`" \
+            "- Upstream commit: \`$upstream_sha\`" \
+            "- New upstream commits proposed: \`$commit_count\`" \
+            'It deliberately does not auto-merge. Review custom protocol, flavor, submodule, data-file, and release changes before merging.')"
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" \
+            --head "$sync_branch" \
+            --title "$title" \
+            --body "$body"

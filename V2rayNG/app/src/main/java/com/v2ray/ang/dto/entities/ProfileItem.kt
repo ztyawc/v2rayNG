@@ -19,6 +19,8 @@ data class ProfileItem(
     var method: String? = null,
     var flow: String? = null,
     var username: String? = null,
+    var cmccProtocol: String? = null,
+    var httpHeaders: Map<String, String>? = null,
 
     var network: String? = null,
     var headerType: String? = null,
@@ -94,6 +96,8 @@ data class ProfileItem(
                 && this.method == obj.method
                 && this.flow == obj.flow
                 && this.username == obj.username
+                && this.cmccProtocol == obj.cmccProtocol
+                && this.httpHeaders == obj.httpHeaders
 
                 && this.network == obj.network
                 && this.headerType == obj.headerType

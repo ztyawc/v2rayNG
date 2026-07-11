@@ -32,6 +32,7 @@ import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.CertificateFingerprintManager
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsChangeManager
+import com.v2ray.ang.util.HttpHeaderParser
 import com.v2ray.ang.util.JsonUtil
 import com.v2ray.ang.util.Utils
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +94,9 @@ class ServerActivity : BaseActivity() {
     private val browserDialerModes: Array<out String> by lazy {
         resources.getStringArray(R.array.browser_dialer_mode)
     }
+    private val cmccProtocols: Array<out String> by lazy {
+        resources.getStringArray(R.array.cmcc_protocols)
+    }
 
 
     // Kotlin synthetics was used, but since it is removed in 1.8. We switch to old manual approach.
@@ -103,6 +107,8 @@ class ServerActivity : BaseActivity() {
     private val et_port: EditText by lazy { findViewById(R.id.et_port) }
     private val et_id: EditText by lazy { findViewById(R.id.et_id) }
     private val et_security: EditText? by lazy { findViewById(R.id.et_security) }
+    private val et_http_headers: EditText? by lazy { findViewById(R.id.et_http_headers) }
+    private val sp_cmcc_protocol: Spinner? by lazy { findViewById(R.id.sp_cmcc_protocol) }
     private val sp_flow: Spinner? by lazy { findViewById(R.id.sp_flow) }
     private val sp_security: Spinner? by lazy { findViewById(R.id.sp_security) }
     private val sp_stream_security: Spinner? by lazy { findViewById(R.id.sp_stream_security) }
@@ -160,17 +166,28 @@ class ServerActivity : BaseActivity() {
 
         val config = MmkvManager.decodeServerConfig(editGuid)
 
-        val layoutId = when (config?.configType ?: createConfigType) {
+        val configType = config?.configType ?: createConfigType
+        val layoutId = when (configType) {
             EConfigType.VMESS -> R.layout.activity_server_vmess
             EConfigType.SHADOWSOCKS -> R.layout.activity_server_shadowsocks
-            EConfigType.SOCKS, EConfigType.HTTP -> R.layout.activity_server_socks
+            EConfigType.SOCKS -> R.layout.activity_server_socks
+            EConfigType.PRIVATE_SOCKS -> R.layout.activity_server_private_socks
+            EConfigType.HTTP -> R.layout.activity_server_http
             EConfigType.VLESS -> R.layout.activity_server_vless
             EConfigType.TROJAN -> R.layout.activity_server_trojan
             EConfigType.WIREGUARD -> R.layout.activity_server_wireguard
             EConfigType.HYSTERIA2 -> R.layout.activity_server_hysteria2
             else -> null
         } ?: return
-        setContentViewWithToolbar(layoutId, showHomeAsUp = true, title = (config?.configType ?: createConfigType).toString())
+        setContentViewWithToolbar(
+            layoutId,
+            showHomeAsUp = true,
+            title = if (configType == EConfigType.PRIVATE_SOCKS) {
+                getString(R.string.server_private_socks)
+            } else {
+                configType.toString()
+            }
+        )
 
         sp_network?.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
@@ -377,6 +394,13 @@ class ServerActivity : BaseActivity() {
 
         if (config.configType == EConfigType.SOCKS || config.configType == EConfigType.HTTP) {
             et_security?.text = Utils.getEditable(config.username.orEmpty())
+            if (config.configType == EConfigType.HTTP) {
+                et_http_headers?.text = Utils.getEditable(HttpHeaderParser.format(config.httpHeaders))
+            }
+        } else if (config.configType == EConfigType.PRIVATE_SOCKS) {
+            et_security?.text = Utils.getEditable(config.username.orEmpty())
+            val cmccProtocol = Utils.arrayFind(cmccProtocols, config.cmccProtocol.orEmpty())
+            sp_cmcc_protocol?.setSelection(if (cmccProtocol >= 0) cmccProtocol else 0)
         } else if (config.configType == EConfigType.VLESS) {
             et_security?.text = Utils.getEditable(config.method.orEmpty())
             val flow = Utils.arrayFind(flows, config.flow.orEmpty())
@@ -456,6 +480,8 @@ class ServerActivity : BaseActivity() {
         et_address.text = null
         et_port.text = Utils.getEditable(DEFAULT_PORT.toString())
         et_id.text = null
+        et_http_headers?.text = null
+        sp_cmcc_protocol?.setSelection(0)
         sp_security?.setSelection(0)
         sp_network?.setSelection(0)
 
@@ -497,8 +523,24 @@ class ServerActivity : BaseActivity() {
         }
         val config =
             MmkvManager.decodeServerConfig(editGuid) ?: ProfileItem.create(createConfigType)
+        if (config.configType == EConfigType.PRIVATE_SOCKS) {
+            if (TextUtils.isEmpty(et_security?.text?.toString()?.trim())) {
+                toast(R.string.server_lab_cmcc_username)
+                return false
+            }
+            if (TextUtils.isEmpty(et_id.text.toString().trim())) {
+                toast(R.string.server_lab_cmcc_password)
+                return false
+            }
+            val cmccProtocolIndex = sp_cmcc_protocol?.selectedItemPosition ?: -1
+            if (cmccProtocolIndex !in cmccProtocols.indices) {
+                toast(R.string.server_lab_cmcc_protocol)
+                return false
+            }
+        }
         if (config.configType != EConfigType.SOCKS
             && config.configType != EConfigType.HTTP
+            && config.configType != EConfigType.PRIVATE_SOCKS
             && TextUtils.isEmpty(et_id.text.toString())
         ) {
             if (config.configType == EConfigType.TROJAN
@@ -510,6 +552,23 @@ class ServerActivity : BaseActivity() {
                 toast(R.string.server_lab_id)
             }
             return false
+        }
+        val httpHeaders = if (config.configType == EConfigType.HTTP) {
+            val parsedHeaders = HttpHeaderParser.parse(et_http_headers?.text?.toString())
+            if (!parsedHeaders.isSuccess) {
+                val error = parsedHeaders.error ?: return false
+                toast(
+                    getString(
+                        R.string.server_lab_http_headers_invalid,
+                        error.lineNumber,
+                        getString(httpHeaderErrorMessage(error.type))
+                    )
+                )
+                return false
+            }
+            parsedHeaders.headers.takeIf { it.isNotEmpty() }
+        } else {
+            null
         }
         sp_stream_security?.let {
             if (config.configType == EConfigType.TROJAN && TextUtils.isEmpty(streamSecuritys[it.selectedItemPosition])) {
@@ -532,6 +591,9 @@ class ServerActivity : BaseActivity() {
         }
 
         saveCommon(config)
+        if (config.configType == EConfigType.HTTP) {
+            config.httpHeaders = httpHeaders
+        }
         saveStreamSettings(config)
         saveTls(config)
 
@@ -567,6 +629,9 @@ class ServerActivity : BaseActivity() {
             if (!TextUtils.isEmpty(et_security?.text) || !TextUtils.isEmpty(et_id.text)) {
                 config.username = et_security?.text.toString().trim()
             }
+        } else if (config.configType == EConfigType.PRIVATE_SOCKS) {
+            config.username = et_security?.text.toString().trim()
+            config.cmccProtocol = cmccProtocols[sp_cmcc_protocol?.selectedItemPosition ?: 0]
         } else if (config.configType == EConfigType.TROJAN) {
         } else if (config.configType == EConfigType.WIREGUARD) {
             config.secretKey = et_id.text.toString().trim()
@@ -581,6 +646,15 @@ class ServerActivity : BaseActivity() {
             config.portHoppingInterval = et_port_hop_interval?.text?.toString()?.trim()
             config.bandwidthDown = et_bandwidth_down?.text?.toString()
             config.bandwidthUp = et_bandwidth_up?.text?.toString()
+        }
+    }
+
+    private fun httpHeaderErrorMessage(type: HttpHeaderParser.ErrorType): Int {
+        return when (type) {
+            HttpHeaderParser.ErrorType.MISSING_COLON -> R.string.server_lab_http_headers_missing_colon
+            HttpHeaderParser.ErrorType.INVALID_NAME -> R.string.server_lab_http_headers_invalid_name
+            HttpHeaderParser.ErrorType.INVALID_VALUE -> R.string.server_lab_http_headers_invalid_value
+            HttpHeaderParser.ErrorType.DUPLICATE_NAME -> R.string.server_lab_http_headers_duplicate_name
         }
     }
 

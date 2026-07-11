@@ -9,6 +9,7 @@ import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.enums.NetworkType
 import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.extension.nullIfBlank
+import com.v2ray.ang.fmt.CmccSocksFmt
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
@@ -27,6 +28,7 @@ object CoreOutboundBuilder {
             EConfigType.VMESS -> toOutboundVmess(profileItem)
             EConfigType.SHADOWSOCKS -> toOutboundShadowsocks(profileItem)
             EConfigType.SOCKS -> toOutboundSocks(profileItem)
+            EConfigType.PRIVATE_SOCKS -> toOutboundPrivateSocks(profileItem)
             EConfigType.VLESS -> toOutboundVless(profileItem)
             EConfigType.TROJAN -> toOutboundTrojan(profileItem)
             EConfigType.WIREGUARD -> toOutboundWireguard(profileItem)
@@ -92,6 +94,10 @@ object CoreOutboundBuilder {
                 settings = OutboundBean.OutSettingsBean(),
                 streamSettings = OutboundBean.StreamSettingsBean()
             )
+
+            // Private SOCKS uses the stock Xray SOCKS outbound. The user-level cmccProtocol
+            // extension selects the private handshake in the patched core.
+            EConfigType.PRIVATE_SOCKS -> createInitOutbound(EConfigType.SOCKS)
 
             EConfigType.WIREGUARD -> OutboundBean(
                 protocol = configType.name.lowercase(),
@@ -219,13 +225,37 @@ object CoreOutboundBuilder {
         return outboundBean
     }
 
-    private fun toOutboundHttp(profileItem: ProfileItem): OutboundBean? {
+    /** Builds a stock SOCKS outbound with the private CMCC authentication marker. */
+    internal fun toOutboundPrivateSocks(profileItem: ProfileItem): OutboundBean? {
+        val cmccProtocol = CmccSocksFmt.normalizeCmccProtocol(profileItem.cmccProtocol) ?: return null
+        val username = profileItem.username?.takeIf { it.isNotBlank() } ?: return null
+        val password = profileItem.password?.takeIf { it.isNotBlank() } ?: return null
+        val port = profileItem.serverPort?.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+        val address = getServerAddress(profileItem).takeIf { it.isNotBlank() } ?: return null
+        val outboundBean = createInitOutbound(EConfigType.SOCKS)
+
+        outboundBean?.settings?.let { settings ->
+            settings.address = address
+            settings.port = port
+            settings.level = AppConfig.DEFAULT_LEVEL
+            settings.user = username
+            settings.pass = password
+            settings.cmccProtocol = cmccProtocol
+        }
+
+        return outboundBean
+    }
+
+    internal fun toOutboundHttp(profileItem: ProfileItem): OutboundBean? {
         val outboundBean = createInitOutbound(EConfigType.HTTP)
 
         outboundBean?.settings?.let { settings ->
             settings.address = getServerAddress(profileItem)
             settings.port = profileItem.serverPort.orEmpty().toInt()
             settings.level = AppConfig.DEFAULT_LEVEL
+            settings.headers = profileItem.httpHeaders
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::LinkedHashMap)
             if (profileItem.username.isNotNullEmpty()) {
                 settings.user = profileItem.username.orEmpty()
                 settings.pass = profileItem.password.orEmpty()

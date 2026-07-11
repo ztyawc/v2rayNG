@@ -15,6 +15,12 @@ import kotlinx.coroutines.withContext
 
 object UpdateCheckerManager {
     suspend fun checkForUpdate(includePreRelease: Boolean = false): CheckUpdateResult = withContext(Dispatchers.IO) {
+        // A side-by-side build has a different application ID and signing key, so an
+        // upstream APK can never update it. Do not even query the upstream release API.
+        if (!BuildConfig.SELF_UPDATE_ENABLED) {
+            return@withContext CheckUpdateResult(hasUpdate = false)
+        }
+
         val url = if (includePreRelease) {
             AppConfig.APP_API_URL
         } else {

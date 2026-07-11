@@ -185,6 +185,7 @@ object AppConfig {
     const val SOCKS = "socks://"
     const val SOCKS4 = "socks4://"
     const val SOCKS5 = "socks5://"
+    const val CMCC_SOCKS = "cmcc://"
     const val HTTP = "http://"
     const val VLESS = "vless://"
     const val TROJAN = "trojan://"

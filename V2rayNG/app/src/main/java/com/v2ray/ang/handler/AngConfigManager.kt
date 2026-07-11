@@ -13,6 +13,7 @@ import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.isNotNullEmpty
+import com.v2ray.ang.fmt.CmccSocksFmt
 import com.v2ray.ang.fmt.CustomFmt
 import com.v2ray.ang.fmt.Hysteria2Fmt
 import com.v2ray.ang.fmt.ShadowsocksFmt
@@ -38,6 +39,7 @@ object AngConfigManager {
             EConfigType.SOCKS.protocolScheme to SocksFmt::parse,
             AppConfig.SOCKS4 to SocksFmt::parse,
             AppConfig.SOCKS5 to SocksFmt::parse,
+            EConfigType.PRIVATE_SOCKS.protocolScheme to CmccSocksFmt::parse,
             EConfigType.TROJAN.protocolScheme to TrojanFmt::parse,
             EConfigType.VLESS.protocolScheme to VlessFmt::parse,
             EConfigType.WIREGUARD.protocolScheme to WireguardFmt::parse,
@@ -154,6 +156,7 @@ object AngConfigManager {
                 EConfigType.VMESS -> VmessFmt.toUri(config)
                 EConfigType.SHADOWSOCKS -> ShadowsocksFmt.toUri(config)
                 EConfigType.SOCKS -> SocksFmt.toUri(config)
+                EConfigType.PRIVATE_SOCKS -> CmccSocksFmt.toUri(config)
                 EConfigType.VLESS -> VlessFmt.toUri(config)
                 EConfigType.TROJAN -> TrojanFmt.toUri(config)
                 EConfigType.WIREGUARD -> WireguardFmt.toUri(config)

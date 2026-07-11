@@ -36,6 +36,7 @@
     <string name="menu_item_import_config_manually_vless">Add [VLESS]</string>
     <string name="menu_item_import_config_manually_ss">Add [Shadowsocks]</string>
     <string name="menu_item_import_config_manually_socks">Add [SOCKS]</string>
+    <string name="menu_item_import_config_manually_private_socks">Add [Private SOCKS]</string>
     <string name="menu_item_import_config_manually_http">Add [HTTP]</string>
     <string name="menu_item_import_config_manually_trojan">Add [Trojan]</string>
     <string name="menu_item_import_config_manually_wireguard">Add [Wireguard]</string>
@@ -79,6 +80,17 @@
     <string name="server_lab_security3">security</string>
     <string name="server_lab_id4">Password(Optional)</string>
     <string name="server_lab_security4">User(Optional)</string>
+    <string name="server_private_socks">Private SOCKS</string>
+    <string name="server_lab_cmcc_username">Username</string>
+    <string name="server_lab_cmcc_password">Password</string>
+    <string name="server_lab_cmcc_protocol">Authentication mode</string>
+    <string name="server_lab_http_headers">Custom HTTP headers</string>
+    <string name="server_lab_http_headers_hint">One per line: Name: Value</string>
+    <string name="server_lab_http_headers_invalid">Invalid HTTP header on line %1$d: %2$s</string>
+    <string name="server_lab_http_headers_missing_colon">missing colon</string>
+    <string name="server_lab_http_headers_invalid_name">invalid header name</string>
+    <string name="server_lab_http_headers_invalid_value">invalid header value</string>
+    <string name="server_lab_http_headers_duplicate_name">duplicate header name</string>
     <string name="server_lab_encryption">encryption</string>
     <string name="server_lab_flow">flow</string>
     <string name="server_lab_public_key">PublicKey</string>

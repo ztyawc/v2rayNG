@@ -49,6 +49,10 @@
                 android:title="@string/menu_item_import_config_manually_socks"
                 app:showAsAction="never" />
             <item
+                android:id="@+id/import_manually_private_socks"
+                android:title="@string/menu_item_import_config_manually_private_socks"
+                app:showAsAction="never" />
+            <item
                 android:id="@+id/import_manually_http"
                 android:title="@string/menu_item_import_config_manually_http"
                 app:showAsAction="never" />

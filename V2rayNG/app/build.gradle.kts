@@ -54,10 +54,19 @@ android {
             dimension = "distribution"
             applicationIdSuffix = ".fdroid"
             buildConfigField("String", "DISTRIBUTION", "\"F-Droid\"")
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
         }
         create("playstore") {
             dimension = "distribution"
             buildConfigField("String", "DISTRIBUTION", "\"Play Store\"")
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
+        }
+        create("telecom") {
+            dimension = "distribution"
+            applicationIdSuffix = ".telecom"
+            buildConfigField("String", "DISTRIBUTION", "\"Telecom\"")
+            // Telecom is a side-by-side build, not a signed upstream distribution.
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "false")
         }
     }
 
@@ -82,6 +91,7 @@ android {
     applicationVariants.all {
         val variant = this
         val isFdroid = variant.productFlavors.any { it.name == "fdroid" }
+        val isTelecom = variant.productFlavors.any { it.name == "telecom" }
         if (isFdroid) {
             val versionCodes =
                 mapOf(
@@ -112,7 +122,8 @@ android {
                     else
                         "universal"
 
-                    output.outputFileName = "v2rayNG_${variant.versionName}_${abi}.apk"
+                    val flavorPrefix = if (isTelecom) "telecom_" else ""
+                    output.outputFileName = "v2rayNG_${flavorPrefix}${variant.versionName}_${abi}.apk"
                     if (versionCodes.containsKey(abi)) {
                         output.versionCodeOverride =
                             (1000000 * versionCodes[abi]!!).plus(variant.versionCode)
