@@ -135,11 +135,27 @@ jobs:
       shell: bash
       env:
         TELECOM_KEYSTORE_BASE64: ${{ secrets.TELECOM_KEYSTORE_BASE64 }}
+        TELECOM_KEYSTORE_PASSWORD: ${{ secrets.TELECOM_KEYSTORE_PASSWORD }}
+        TELECOM_KEY_ALIAS: ${{ secrets.TELECOM_KEY_ALIAS }}
+        TELECOM_CERT_SHA256: ${{ secrets.TELECOM_CERT_SHA256 }}
       run: |
         set -euo pipefail
         keystore="$RUNNER_TEMP/telecom-release.keystore"
         printf '%s' "$TELECOM_KEYSTORE_BASE64" | base64 --decode > "$keystore"
         test -s "$keystore"
+
+        keystore_cert_sha256="$(keytool -list -v \
+          -keystore "$keystore" \
+          -storepass "$TELECOM_KEYSTORE_PASSWORD" \
+          -alias "$TELECOM_KEY_ALIAS" 2>/dev/null | awk -F': ' '/SHA256:/ && !seen {print toupper($2); seen=1}' | tr -d ':')"
+        expected_cert_sha256="$(tr -d '[:space:]:' <<< "$TELECOM_CERT_SHA256" | tr '[:lower:]' '[:upper:]')"
+        test -n "$keystore_cert_sha256"
+        echo "Signing keystore certificate SHA-256: $keystore_cert_sha256"
+        if [[ "$keystore_cert_sha256" != "$expected_cert_sha256" ]]; then
+          echo "::error::Decoded signing keystore does not match TELECOM_CERT_SHA256."
+          exit 1
+        fi
+
         echo "path=$keystore" >> "$GITHUB_OUTPUT"
 
     - name: Build signed Telecom APK
@@ -181,7 +197,11 @@ jobs:
         actual_cert_sha256="$(awk -F': ' '/certificate SHA-256 digest:/{print toupper($2); exit}' <<< "$signer_output")"
         expected_cert_sha256="$(tr -d '[:space:]:' <<< "$TELECOM_CERT_SHA256" | tr '[:lower:]' '[:upper:]')"
         test -n "$actual_cert_sha256"
-        test "$actual_cert_sha256" = "$expected_cert_sha256"
+        echo "APK signer certificate SHA-256: $actual_cert_sha256"
+        if [[ "$actual_cert_sha256" != "$expected_cert_sha256" ]]; then
+          echo "::error::APK signer does not match TELECOM_CERT_SHA256."
+          exit 1
+        fi
 
         echo "apk=$apk" >> "$GITHUB_OUTPUT"
 
