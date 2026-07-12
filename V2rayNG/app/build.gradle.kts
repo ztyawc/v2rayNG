@@ -12,8 +12,8 @@ android {
         applicationId = "com.v2ray.ang"
         minSdk = 24
         targetSdk = 37
-        versionCode = 737
-        versionName = "2.2.7"
+        versionCode = 738
+        versionName = "2.2.7.1"
         multiDexEnabled = true
         buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/2dust/v2rayNG/releases\"")
         buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s_%s.apk\"")
