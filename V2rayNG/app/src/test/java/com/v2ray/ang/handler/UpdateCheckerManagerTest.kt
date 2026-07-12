@@ -118,6 +118,7 @@ class UpdateCheckerManagerTest {
     @Test
     fun comparesNumericReleaseVersions() {
         assertTrue(UpdateCheckerManager.compareVersions("2.2.7", "2.2.6") > 0)
+        assertTrue(UpdateCheckerManager.compareVersions("2.2.7.1", "2.2.7") > 0)
         assertTrue(UpdateCheckerManager.compareVersions("2.2.6.1", "2.2.6") > 0)
         assertEquals(0, UpdateCheckerManager.compareVersions("2.2.7", "2.2.7"))
     }
