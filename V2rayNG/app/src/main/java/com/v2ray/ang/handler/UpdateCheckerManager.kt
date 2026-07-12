@@ -6,26 +6,24 @@ import com.v2ray.ang.BuildConfig
 import com.v2ray.ang.dto.CheckUpdateResult
 import com.v2ray.ang.dto.GitHubRelease
 import com.v2ray.ang.dto.UrlContentRequest
-import com.v2ray.ang.extension.concatUrl
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 object UpdateCheckerManager {
     suspend fun checkForUpdate(includePreRelease: Boolean = false): CheckUpdateResult = withContext(Dispatchers.IO) {
-        // A side-by-side build has a different application ID and signing key, so an
-        // upstream APK can never update it. Do not even query the upstream release API.
+        // Flavors can opt out when they have no compatible release channel.
         if (!BuildConfig.SELF_UPDATE_ENABLED) {
             return@withContext CheckUpdateResult(hasUpdate = false)
         }
 
-        val url = if (includePreRelease) {
-            AppConfig.APP_API_URL
-        } else {
-            AppConfig.APP_API_URL.concatUrl("latest")
-        }
+        // Use the releases list instead of /latest. A new fork has no /latest
+        // endpoint until its first release, whereas /releases correctly returns
+        // an empty array. It also lets us skip releases without a compatible APK.
+        val url = BuildConfig.UPDATE_API_URL
 
         val proxyUsername = SettingsManager.getSocksUsername()
         val proxyPassword = SettingsManager.getSocksPassword()
@@ -50,38 +48,25 @@ object UpdateCheckerManager {
                 ?: throw IllegalStateException("Failed to get response")
         }
 
-        val latestRelease = if (includePreRelease) {
-            JsonUtil.fromJsonSafe(response, Array<GitHubRelease>::class.java)
-                ?.firstOrNull()
-                ?: throw IllegalStateException("No pre-release found")
-        } else {
-            JsonUtil.fromJsonSafe(response, GitHubRelease::class.java)
-        }
-        if (latestRelease == null) {
-            return@withContext CheckUpdateResult(hasUpdate = false)
-        }
-
-        val latestVersion = latestRelease.tagName.removePrefix("v")
-        LogUtil.i(
-            AppConfig.TAG,
-            "Found new version: $latestVersion (current: ${BuildConfig.VERSION_NAME})"
+        val releases = JsonUtil.fromJsonSafe(response, Array<GitHubRelease>::class.java)
+            ?.asList()
+            .orEmpty()
+        val result = findUpdate(
+            releases = releases,
+            currentVersion = BuildConfig.VERSION_NAME,
+            supportedAbis = Build.SUPPORTED_ABIS.asList(),
+            includePreRelease = includePreRelease
         )
-
-        return@withContext if (compareVersions(latestVersion, BuildConfig.VERSION_NAME) > 0) {
-            val downloadUrl = getDownloadUrl(latestRelease, Build.SUPPORTED_ABIS[0])
-            CheckUpdateResult(
-                hasUpdate = true,
-                latestVersion = latestVersion,
-                releaseNotes = latestRelease.body,
-                downloadUrl = downloadUrl,
-                isPreRelease = latestRelease.prerelease
+        if (result.hasUpdate) {
+            LogUtil.i(
+                AppConfig.TAG,
+                "Found new version: ${result.latestVersion} (current: ${BuildConfig.VERSION_NAME})"
             )
-        } else {
-            CheckUpdateResult(hasUpdate = false)
         }
+        return@withContext result
     }
 
-    private fun compareVersions(version1: String, version2: String): Int {
+    internal fun compareVersions(version1: String, version2: String): Int {
         val v1 = version1.split(".")
         val v2 = version2.split(".")
 
@@ -93,20 +78,68 @@ object UpdateCheckerManager {
         return 0
     }
 
-    private fun getDownloadUrl(release: GitHubRelease, abi: String): String {
-        val fDroid = "fdroid"
+    internal fun findUpdate(
+        releases: List<GitHubRelease>,
+        currentVersion: String,
+        supportedAbis: List<String>,
+        includePreRelease: Boolean
+    ): CheckUpdateResult {
+        var selected: UpdateCandidate? = null
 
-        val assetsByAbi = release.assets.filter {
-            (it.name.contains(abi, true))
+        releases.forEach { release ->
+            if (!includePreRelease && release.prerelease) {
+                return@forEach
+            }
+
+            val version = release.tagName.removePrefix("v")
+            val isNewer = runCatching { compareVersions(version, currentVersion) > 0 }
+                .getOrDefault(false)
+            if (!isNewer) {
+                return@forEach
+            }
+
+            val downloadUrl = getDownloadUrl(release, supportedAbis, version)
+            if (downloadUrl == null) {
+                return@forEach
+            }
+
+            val currentSelection = selected
+            if (currentSelection == null || compareVersions(version, currentSelection.version) > 0) {
+                selected = UpdateCandidate(release, version, downloadUrl)
+            }
         }
 
-        val asset = if (BuildConfig.APPLICATION_ID.contains(fDroid, ignoreCase = true)) {
-            assetsByAbi.firstOrNull { it.name.contains(fDroid) }
-        } else {
-            assetsByAbi.firstOrNull { !it.name.contains(fDroid) }
-        }
-
-        return asset?.browserDownloadUrl
-            ?: throw IllegalStateException("No compatible APK found")
+        return selected?.let {
+            CheckUpdateResult(
+                hasUpdate = true,
+                latestVersion = it.version,
+                releaseNotes = it.release.body,
+                downloadUrl = it.downloadUrl,
+                isPreRelease = it.release.prerelease
+            )
+        } ?: CheckUpdateResult(hasUpdate = false)
     }
+
+    internal fun getDownloadUrl(
+        release: GitHubRelease,
+        supportedAbis: List<String>,
+        version: String = release.tagName.removePrefix("v")
+    ): String? {
+        val assetNames = (supportedAbis + "universal")
+            .distinct()
+            .map { abi ->
+                String.format(Locale.ROOT, BuildConfig.UPDATE_APK_TEMPLATE, version, abi)
+            }
+
+        return assetNames.firstNotNullOfOrNull { assetName ->
+            release.assets.firstOrNull { it.name.equals(assetName, ignoreCase = true) }
+                ?.browserDownloadUrl
+        }
+    }
+
+    private data class UpdateCandidate(
+        val release: GitHubRelease,
+        val version: String,
+        val downloadUrl: String
+    )
 }
