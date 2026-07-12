@@ -12,9 +12,11 @@ android {
         applicationId = "com.v2ray.ang"
         minSdk = 24
         targetSdk = 37
-        versionCode = 736
-        versionName = "2.2.6"
+        versionCode = 737
+        versionName = "2.2.7"
         multiDexEnabled = true
+        buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/2dust/v2rayNG/releases\"")
+        buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s_%s.apk\"")
 
         val abiFilterList = (properties["ABI_FILTERS"] as? String)?.split(';')
         splits {
@@ -55,6 +57,7 @@ android {
             applicationIdSuffix = ".fdroid"
             buildConfigField("String", "DISTRIBUTION", "\"F-Droid\"")
             buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
+            buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s-fdroid_%s.apk\"")
         }
         create("playstore") {
             dimension = "distribution"
@@ -65,8 +68,10 @@ android {
             dimension = "distribution"
             applicationIdSuffix = ".telecom"
             buildConfigField("String", "DISTRIBUTION", "\"Telecom\"")
-            // Telecom is a side-by-side build, not a signed upstream distribution.
-            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "false")
+            // Releases are signed by this fork and must never be replaced by upstream APKs.
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
+            buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/ztyawc/v2rayNG/releases\"")
+            buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_telecom_%s_%s.apk\"")
         }
     }
 

@@ -35,13 +35,11 @@
             android:id="@+id/logcat"
             android:icon="@drawable/ic_logcat_24dp"
             android:title="@string/title_logcat" />
-        <!-- Keep the ID for MainActivity's shared menu handler, but do not expose
-             upstream self-update in this separately signed application. -->
+        <!-- Telecom updates are served only from this fork's signed GitHub Releases. -->
         <item
             android:id="@+id/check_for_update"
             android:icon="@drawable/ic_check_update_24dp"
-            android:title="@string/update_check_for_update"
-            android:visible="false" />
+            android:title="@string/update_check_for_update" />
         <item
             android:id="@+id/backup_restore"
             android:icon="@drawable/ic_restore_24dp"
