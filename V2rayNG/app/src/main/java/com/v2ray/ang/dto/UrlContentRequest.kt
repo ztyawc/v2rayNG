@@ -6,6 +6,5 @@ data class UrlContentRequest(
     val httpPort: Int = 0,
     val proxyUsername: String? = null,
     val proxyPassword: String? = null,
-    val userAgent: String? = null,
-    val requestHeaders: String? = null
+    val userAgent: String? = null
 )

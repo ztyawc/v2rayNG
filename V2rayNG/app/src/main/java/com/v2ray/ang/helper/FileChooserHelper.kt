@@ -1,12 +1,11 @@
 package com.v2ray.ang.helper
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
-import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import com.v2ray.ang.extension.toast
@@ -16,14 +15,14 @@ import com.v2ray.ang.util.LogUtil
  * Helper for choosing and creating files using Android Storage Access Framework.
  * Supports both file selection (ACTION_GET_CONTENT) and file creation (CreateDocument).
  */
-class FileChooserHelper(private val activity: ComponentActivity) {
+class FileChooserHelper(private val activity: AppCompatActivity) {
     private var fileChooserCallback: ((Uri?) -> Unit)? = null
     private var documentCreateCallback: ((Uri?) -> Unit)? = null
 
     private val fileChooserLauncher: ActivityResultLauncher<Intent> =
         activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val uri = result.data?.data
-            if (result.resultCode == Activity.RESULT_OK && uri != null) {
+            if (result.resultCode == AppCompatActivity.RESULT_OK && uri != null) {
                 fileChooserCallback?.invoke(uri)
             } else {
                 fileChooserCallback?.invoke(null)
