@@ -248,7 +248,7 @@
     <string name="summary_pref_append_http_proxy">پروکسی HTTP مستقیماً از (مرورگر/برخی برنامه‌های پشتیبانی‌شده)، بدون استفاده از دستگاه NIC مجازی (Android 10+) استفاده می‌شود.</string>
 
     <string name="title_pref_double_column_display">فعال کردن نمایش دو ستون</string>
-    <string name="summary_pref_double_column_display">لیست نمایه در دو ستون نمایش داده می شود و امکان نمایش محتوای بیشتری را بر روی صفحه نمایش می دهد. برای اجرا باید برنامه را مجددا راه اندازی کنید.</string>
+    <string name="summary_pref_double_column_display">The profile list is displayed in double columns, allowing more content to be displayed on the screen.</string>
 
     <string name="title_pref_group_all_display">Enable show all groups</string>
     <string name="summary_pref_group_all_display">Add an extra "All Tabs" page</string>
@@ -309,6 +309,7 @@
     <string name="title_filter_config">فیلتر کردن کانفیگ‌ها</string>
     <string name="filter_config_all">همه</string>
     <string name="title_del_duplicate_config_count">حذف %d کانفیگ تکراری</string>
+    <string name="summary_scan_qrcode">Click screen open the camera scan</string>
 
     <string name="title_del_config_count">حذف %d کانفیگ</string>
     <string name="title_import_config_count">وارد کردن %d کانفیگ</string>
@@ -365,6 +366,14 @@
     <string name="title_pref_fragment_interval">فاصله بین بسته های فرگمنت (حداقل-حداکثر)</string>
     <string name="title_pref_fragment_enabled">فعال کردن فرگمنت</string>
     <string name="title_pref_fragment_maxsplit">حداکثر تقسیم فرگمنت</string>
+    <string name="title_observatory_settings">تنظیمات پایش اتصال</string>
+    <string name="title_pref_observatory_least_ping_interval">فاصله leastPing</string>
+    <string name="title_pref_observatory_least_load_interval">فاصله leastLoad</string>
+    <string name="title_pref_observatory_least_load_method">روش HTTP برای leastLoad</string>
+    <string name="title_pref_observatory_least_load_sampling">نمونه‌برداری leastLoad</string>
+    <string name="title_pref_observatory_least_load_timeout">مهلت زمانی leastLoad</string>
+    <string name="toast_invalid_observatory_duration">مدت زمان نامعتبر است. از مقداری مانند 3m یا 30s استفاده کنید.</string>
+    <string name="toast_invalid_observatory_sampling">مقدار نمونه‌برداری نامعتبر است. از یک عدد مثبت استفاده کنید.</string>
 
     <string name="update_check_for_update">بررسی به روز رسانی</string>
     <string name="update_already_latest_version">در حال حاضر آخرین نسخه نصب شده است</string>
