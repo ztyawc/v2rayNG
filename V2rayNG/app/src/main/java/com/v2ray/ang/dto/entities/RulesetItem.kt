@@ -1,7 +1,6 @@
 package com.v2ray.ang.dto.entities
 
 data class RulesetItem(
-    var id: String = "",
     var remarks: String? = "",
     var ip: List<String>? = null,
     var domain: List<String>? = null,
