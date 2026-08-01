@@ -11,9 +11,9 @@ import com.v2ray.ang.dto.TestServiceMessage
 import com.v2ray.ang.enums.NotificationChannelType
 import com.v2ray.ang.extension.serializable
 import com.v2ray.ang.handler.MmkvManager
+import com.v2ray.ang.helper.MessageHelper
+import com.v2ray.ang.helper.NotificationHelper
 import com.v2ray.ang.util.LogUtil
-import com.v2ray.ang.util.MessageUtil
-import com.v2ray.ang.util.NotificationHelper
 import java.util.Collections
 
 class CoreTestService : Service() {
@@ -59,6 +59,12 @@ class CoreTestService : Service() {
      * @return The start mode.
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        NotificationHelper.startForeground(
+            this,
+            NotificationChannelType.CORE_TEST,
+            getString(R.string.app_name),
+            getString(R.string.title_real_ping_all_server)
+        )
         val message = intent?.serializable<TestServiceMessage>("content")
         if (message == null) {
             stopSelf(startId)
@@ -78,13 +84,6 @@ class CoreTestService : Service() {
     private fun handleMeasureStart(message: TestServiceMessage, startId: Int) {
         LogUtil.i(AppConfig.TAG, "CoreTestService starting worker   subscription ${message.subscriptionId}")
 
-        NotificationHelper.startForeground(
-            this,
-            NotificationChannelType.CORE_TEST,
-            getString(R.string.app_name),
-            getString(R.string.title_real_ping_all_server)
-        )
-
         val guidsList = when {
             message.serverGuids.isNotEmpty() -> message.serverGuids
             message.subscriptionId.isNotEmpty() -> MmkvManager.decodeServerList(message.subscriptionId)
@@ -96,6 +95,7 @@ class CoreTestService : Service() {
             worker = RealPingWorkerService(
                 context = this,
                 guids = guidsList,
+                onlyTcp = message.onlyTcp,
                 onEvent = { event -> handleWorkerEvent(event) { activeWorkers.remove(worker) } }
             )
             activeWorkers.add(worker)
@@ -112,18 +112,19 @@ class CoreTestService : Service() {
                 NotificationHelper.updateNotification(
                     channelType = NotificationChannelType.CORE_TEST,
                     context = this,
+                    title = getString(R.string.app_name),
                     content = getString(R.string.connection_runing_task_left, event.text)
                 )
-                MessageUtil.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_NOTIFY, event.text)
+                MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_NOTIFY, event.text)
             }
 
             is RealPingEvent.Result -> {
                 MmkvManager.encodeServerTestDelayMillis(event.guid, event.delayMillis)
-                MessageUtil.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_SUCCESS, event.guid)
+                MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_SUCCESS, event.guid)
             }
 
             is RealPingEvent.Finish -> {
-                MessageUtil.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_FINISH, event.status)
+                MessageHelper.sendMsg2UI(this, AppConfig.MSG_MEASURE_CONFIG_FINISH, event.status)
                 onWorkerDone()
                 if (activeWorkers.isEmpty()) {
                     NotificationHelper.stopForeground(this)

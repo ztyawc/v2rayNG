@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.res.AssetManager
 import android.os.Build
 import android.text.TextUtils
-import androidx.appcompat.app.AppCompatDelegate
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.AppConfig.ANG_PACKAGE
 import com.v2ray.ang.AppConfig.DEFAULT_SUBSCRIPTION_ID
@@ -20,6 +19,7 @@ import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.enums.Language
 import com.v2ray.ang.enums.RoutingType
 import com.v2ray.ang.enums.VpnInterfaceAddressConfig
+import com.v2ray.ang.extension.moveItem
 import com.v2ray.ang.handler.MmkvManager.decodeAllServerList
 import com.v2ray.ang.handler.MmkvManager.decodeServerConfig
 import com.v2ray.ang.handler.MmkvManager.decodeSubsList
@@ -31,7 +31,6 @@ import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import java.io.File
 import java.io.FileOutputStream
-import java.util.Collections
 import java.util.Locale
 import kotlin.random.Random
 
@@ -203,32 +202,6 @@ object SettingsManager {
             it.domain?.contains(GEOSITE_PRIVATE) == true || it.ip?.contains(GEOIP_PRIVATE) == true
         }
         return exist == true
-    }
-
-    /**
-     * Swap routing rulesets.
-     * @param fromPosition The position to swap from.
-     * @param toPosition The position to swap to.
-     */
-    fun swapRoutingRuleset(fromPosition: Int, toPosition: Int) {
-        val rulesetList = MmkvManager.decodeRoutingRulesets()
-        if (rulesetList.isNullOrEmpty()) return
-
-        Collections.swap(rulesetList, fromPosition, toPosition)
-        MmkvManager.encodeRoutingRulesets(rulesetList)
-    }
-
-    /**
-     * Swap subscriptions.
-     * @param fromPosition The position to swap from.
-     * @param toPosition The position to swap to.
-     */
-    fun swapSubscriptions(fromPosition: Int, toPosition: Int) {
-        val subsList = decodeSubsList()
-        if (subsList.isEmpty()) return
-
-        Collections.swap(subsList, fromPosition, toPosition)
-        MmkvManager.encodeSubsList(subsList)
     }
 
     /**
@@ -440,17 +413,6 @@ object SettingsManager {
     }
 
     /**
-     * Set night mode.
-     */
-    fun setNightMode() {
-        when (MmkvManager.decodeSettingsString(AppConfig.PREF_UI_MODE_NIGHT, "0")) {
-            "0" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
-            "1" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
-            "2" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
-        }
-    }
-
-    /**
      * Retrieves the currently selected VPN interface address configuration.
      * This method reads the user's preference for VPN interface addressing and returns
      * the corresponding configuration containing IPv4 and IPv6 addresses.
@@ -535,6 +497,11 @@ object SettingsManager {
         ensureDefaultValue(AppConfig.PREF_FRAGMENT_LENGTH, "50-100")
         ensureDefaultValue(AppConfig.PREF_FRAGMENT_INTERVAL, "10-20")
         ensureDefaultValue(AppConfig.PREF_FRAGMENT_MAXSPLIT, "10")
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_PING_INTERVAL, AppConfig.OBSERVATORY_LEAST_PING_INTERVAL)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_INTERVAL, AppConfig.OBSERVATORY_LEAST_LOAD_INTERVAL)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_METHOD, AppConfig.OBSERVATORY_LEAST_LOAD_METHOD)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_SAMPLING, AppConfig.OBSERVATORY_LEAST_LOAD_SAMPLING)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_TIMEOUT, AppConfig.OBSERVATORY_LEAST_LOAD_TIMEOUT)
     }
 
     private fun ensureDefaultValue(key: String, default: String) {
@@ -630,10 +597,10 @@ object SettingsManager {
             )
             encodeSubscription(DEFAULT_SUBSCRIPTION_ID, defaultSub)
 
-            // Move top
+            // Move to the top
             val subsList = decodeSubsList()
-            if (subsList.count() > 1) {
-                swapSubscriptions(0, subsList.count() - 1)
+            if (subsList.moveItem(subsList.lastIndex, 0)) {
+                MmkvManager.encodeSubsList(subsList)
             }
         }
     }

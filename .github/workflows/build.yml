@@ -78,7 +78,7 @@ jobs:
       run: bash AndroidLibXrayLite/scripts/build-libv2ray-arm64.sh
 
     - name: Setup Java
-      uses: actions/setup-java@v5
+      uses: actions/setup-java@v5.6.0
       with:
         distribution: 'temurin'
         java-version: '21'

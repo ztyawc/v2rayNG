@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Version tag matching the APK version, for example v2.2.7"
+        description: "Version tag matching the APK version, for example v2.3.1.1"
         required: true
         type: string
+      pre_release:
+        description: "Publish as a pre-release (normally used while following an upstream pre-release)"
+        required: false
+        default: false
+        type: boolean
       release_notes:
         description: "Optional release notes shown in the in-app update dialog"
         required: false
@@ -27,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_PRE_RELEASE: ${{ inputs.pre_release }}
       RELEASE_NOTES: ${{ inputs.release_notes }}
 
     steps:
@@ -236,11 +242,17 @@ jobs:
         else
           printf '%s\n' 'Telecom release from the patched v2rayNG fork.' > "$notes_file"
         fi
-        gh release create "$RELEASE_TAG" release-files/* \
-          --repo "$GITHUB_REPOSITORY" \
-          --title "Telecom $RELEASE_TAG" \
-          --notes-file "$notes_file" \
-          --latest
+        release_args=(
+          --repo "$GITHUB_REPOSITORY"
+          --title "Telecom $RELEASE_TAG"
+          --notes-file "$notes_file"
+        )
+        if [[ "$RELEASE_PRE_RELEASE" == "true" ]]; then
+          release_args+=(--prerelease)
+        else
+          release_args+=(--latest)
+        fi
+        gh release create "$RELEASE_TAG" release-files/* "${release_args[@]}"
 
     - name: Upload release artifact
       uses: actions/upload-artifact@v7

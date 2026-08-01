@@ -44,11 +44,15 @@ object AppConfig {
     const val PREF_FRAGMENT_LENGTH = "pref_fragment_length"
     const val PREF_FRAGMENT_INTERVAL = "pref_fragment_interval"
     const val PREF_FRAGMENT_MAXSPLIT = "pref_fragment_maxsplit"
+    const val PREF_OBSERVATORY_LEAST_PING_INTERVAL = "pref_observatory_least_ping_interval"
+    const val PREF_OBSERVATORY_LEAST_LOAD_INTERVAL = "pref_observatory_least_load_interval"
+    const val PREF_OBSERVATORY_LEAST_LOAD_METHOD = "pref_observatory_least_load_method"
+    const val PREF_OBSERVATORY_LEAST_LOAD_SAMPLING = "pref_observatory_least_load_sampling"
+    const val PREF_OBSERVATORY_LEAST_LOAD_TIMEOUT = "pref_observatory_least_load_timeout"
     const val SUBSCRIPTION_UPDATE_TASK_NAME = "subscription_updater"
     const val SUBSCRIPTION_MIN_INTERVAL_MINUTES = 15L
     const val PREF_SPEED_ENABLED = "pref_speed_enabled"
     const val PREF_CONFIRM_REMOVE = "pref_confirm_remove"
-    const val PREF_START_SCAN_IMMEDIATE = "pref_start_scan_immediate"
     const val PREF_DOUBLE_COLUMN_DISPLAY = "pref_double_column_display"
     const val PREF_GROUP_ALL_DISPLAY = "pref_group_all_display"
     const val PREF_LANGUAGE = "pref_language"
@@ -78,6 +82,8 @@ object AppConfig {
     const val PREF_USE_HEV_TUNNEL = "pref_use_hev_tunnel_v2"
     const val PREF_HEV_TUNNEL_LOGLEVEL = "pref_hev_tunnel_loglevel"
     const val PREF_HEV_TUNNEL_RW_TIMEOUT = "pref_hev_tunnel_rw_timeout_v2"
+    const val PREF_UPDATE_SUBSCRIPTION = "pref_update_subscription"
+    const val PREF_AUTO_TEST_AFTER_UPDATE_SUBSCRIPTION = "pref_auto_test_after_update_subscription"
     const val PREF_AUTO_REMOVE_INVALID_AFTER_TEST = "pref_auto_remove_invalid_after_test"
     const val PREF_AUTO_SORT_AFTER_TEST = "pref_auto_sort_after_test"
     const val PREF_REAL_PING_CONCURRENCY = "pref_real_ping_concurrency"
@@ -128,6 +134,11 @@ object AppConfig {
     const val TG_CHANNEL_URL = "https://t.me/github_2dust"
     const val DELAY_TEST_URL = "https://www.gstatic.com/generate_204"
     const val DELAY_TEST_URL2 = "https://www.google.com/generate_204"
+    const val OBSERVATORY_LEAST_PING_INTERVAL = "3m"
+    const val OBSERVATORY_LEAST_LOAD_INTERVAL = "5m"
+    const val OBSERVATORY_LEAST_LOAD_METHOD = "HEAD"
+    const val OBSERVATORY_LEAST_LOAD_SAMPLING = "2"
+    const val OBSERVATORY_LEAST_LOAD_TIMEOUT = "30s"
 
     //    const val IP_API_URL = "https://speed.cloudflare.com/meta"
     const val IP_API_URL = "https://api.ip.sb/geoip"
@@ -174,9 +185,13 @@ object AppConfig {
     const val MSG_MEASURE_CONFIG_NOTIFY = 73
     const val MSG_MEASURE_CONFIG_FINISH = 74
 
+    const val MSG_SUB_UPDATE_START = 8
+    const val MSG_SUB_UPDATE_CANCEL = 81
+
     /** Notification channel IDs and names. */
-    const val RAY_NG_CHANNEL_ID = "RAY_NG_M_CH_ID"
-    const val RAY_NG_CHANNEL_NAME = "v2rayNG Background Service"
+    // Use a new ID because Android does not let an app raise an existing channel's importance.
+    const val RAY_NG_CHANNEL_ID = "CORE_M_CH_ID_V2"
+    const val RAY_NG_CHANNEL_NAME = "Core Background Service"
 
     /** Protocols Scheme **/
     const val VMESS = "vmess://"
@@ -194,30 +209,31 @@ object AppConfig {
     const val HYSTERIA = "hysteria://"
     const val HYSTERIA2 = "hysteria2://"
     const val HY2 = "hy2://"
+    const val V2RAYNFMTS = "v2rayn://"
 
     /** Give a good name to this, IDK*/
     const val VPN = "VPN"
     const val VPN_MTU = 1500
 
     /** Root (system-wide) mode runtime constants. */
-    const val ROOT_RUNTIME_DIR = "root"
-    const val ROOT_IPTABLES_CHAIN = "V2RAY_NG"
+    const val ROOT_RUNTIME_DIR = "sys_cache"
+    const val ROOT_IPTABLES_CHAIN = "CORE_FILTER"
     const val ROOT_FWMARK = 255            // defensive RETURN tag; hev's only upstream socket is loopback (already bypassed)
     const val ROOT_MARK_ROUTE = 1          // packets we want pushed into the tun device
     const val ROOT_ROUTE_TABLE = 2024
     const val ROOT_RULE_PRIORITY = 1000
-    const val ROOT_TUN_NAME = "v2raytun0"
+    const val ROOT_TUN_NAME = "utun7788"
     const val ROOT_TUN_ADDR_V4 = "198.18.0.1/15"
     const val ROOT_TUN_ADDR_V6 = "fdfe:dcba:9876::1/64"
 
     // hev-socks5-tunnel run as a standalone root binary (reuses the same project already
     // bundled for the VPN hev path; distinct filename from the JNI lib to avoid collision).
     const val ROOT_TUN2SOCKS_BIN = "libhevsockstun.so"
-    const val ROOT_FWD_CHAIN = "V2RAY_NG_FWD"   // FORWARD chain for LAN/tethering sharing
-    const val ROOT_DNS_CHAIN = "V2RAY_NG_DNS"   // nat chain for tethered-client DNS DNAT
-    const val ROOT_V6_CHAIN = "V2RAY_NG6"       // ip6tables filter/OUTPUT chain: blackhole native IPv6 when it isn't tunneled
-    const val ROOT_V6_FWD_CHAIN = "V2RAY_NG6_FWD" // ip6tables FORWARD chain: route or reject tethered clients' native IPv6
-    const val ROOT_V6_PRE_CHAIN = "V2RAY_NG6_PRE" // ip6tables mangle/PREROUTING chain: mark forwarded clients' IPv6 into the tun
+    const val ROOT_FWD_CHAIN = "CORE_FWD"   // FORWARD chain for LAN/tethering sharing
+    const val ROOT_DNS_CHAIN = "CORE_DNS"   // nat chain for tethered-client DNS DNAT
+    const val ROOT_V6_CHAIN = "CORE6_FILTER"       // ip6tables filter/OUTPUT chain: blackhole native IPv6 when it isn't tunneled
+    const val ROOT_V6_FWD_CHAIN = "CORE6_FWD" // ip6tables FORWARD chain: route or reject tethered clients' native IPv6
+    const val ROOT_V6_PRE_CHAIN = "CORE6_PRE" // ip6tables mangle/PREROUTING chain: mark forwarded clients' IPv6 into the tun
     const val ROOT_LAN_DNS = "1.1.1.1"          // fallback resolver for tethered clients when no plain-IPv4 DNS is configured
     const val ROOT_OOM_SCORE = "-1000"          // oom_score_adj that makes the LMK never kill us
 
@@ -325,4 +341,6 @@ object AppConfig {
         TAG_DIRECT,
         TAG_BLOCKED,
     )
+
+    val OBSERVATORY_DURATION_PATTERN = Regex("""[1-9]\d*(ms|s|m|h)""")
 }

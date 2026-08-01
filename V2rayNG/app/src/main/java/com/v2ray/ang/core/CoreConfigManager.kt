@@ -374,10 +374,19 @@ object CoreConfigManager {
         } else {
             "${AppConfig.TAG_BALANCER_PRE}-${resolvedOutbound.tag}"
         }
+        val strategyType = BalancerStrategyType.from(resolvedOutbound.profile.policyGroupType)
+        val fallbackTag = if (strategyType.supportsObservatory && resolvedOutbound.profile.policyGroupTestOutbounds != false) {
+            resolvedOutbound.profile.policyGroupFallbackTag
+                ?.takeIf { it.isNotEmpty() && it != AppConfig.TAG_PROXY }
+            // Xray excludes dead random/roundRobin candidates only when fallbackTag is set;
+            // without this default, an enabled empty field creates no observatory.
+                ?: membersToAdd.first().tag
+        } else null
         val strategy = buildBalancerStrategy(
-            policyGroupType = resolvedOutbound.profile.policyGroupType,
+            strategyType = strategyType,
             selector = listOf(memberTagPrefix),
             balancerTag = balancerTag,
+            fallbackTag = fallbackTag,
         )
         val existingBalancers = v2rayConfig.routing.balancers?.toMutableList() ?: mutableListOf()
         if (existingBalancers.none { it.tag == balancerTag }) {
@@ -915,7 +924,7 @@ object CoreConfigManager {
         return hosts
     }
 
-    private fun buildDnsCnModeFromRoutingRules(configContext: CoreConfigContext, servers: ArrayList<Any>, domesticDns: List<String>,    ): List<String> {
+    private fun buildDnsCnModeFromRoutingRules(configContext: CoreConfigContext, servers: ArrayList<Any>, domesticDns: List<String>): List<String> {
         val cnRegionFilter = { domain: String ->
             domain.startsWith("geosite:") && (domain.endsWith("-cn") || domain.endsWith("@cn"))
                     || domain == AppConfig.GEOSITE_CN
@@ -981,6 +990,7 @@ object CoreConfigManager {
                         domesticDnsTags.add(tag)
                     }
                 }
+
                 AppConfig.TAG_BLOCKED -> Unit
                 else -> {
                     servers.add(
@@ -1179,22 +1189,28 @@ object CoreConfigManager {
      * Build balancer and probe settings from one policy-group strategy value.
      */
     private fun buildBalancerStrategy(
-        policyGroupType: String?,
+        strategyType: BalancerStrategyType,
         selector: List<String>,
         balancerTag: String = AppConfig.TAG_BALANCER,
+        fallbackTag: String? = null,
     ): BalancerStrategy {
         val probeUrl = MmkvManager.decodeSettingsString(AppConfig.PREF_DELAY_TEST_URL) ?: AppConfig.DELAY_TEST_URL
-        val strategyType = BalancerStrategyType.from(policyGroupType)
+        val leastPingInterval = decodeObservatoryDuration(AppConfig.PREF_OBSERVATORY_LEAST_PING_INTERVAL, AppConfig.OBSERVATORY_LEAST_PING_INTERVAL)
+        val leastLoadInterval = decodeObservatoryDuration(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_INTERVAL, AppConfig.OBSERVATORY_LEAST_LOAD_INTERVAL)
+        val leastLoadMethod = MmkvManager.decodeSettingsString(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_METHOD, AppConfig.OBSERVATORY_LEAST_LOAD_METHOD)
+        val leastLoadSampling = decodeObservatorySampling()
+        val leastLoadTimeout = decodeObservatoryDuration(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_TIMEOUT, AppConfig.OBSERVATORY_LEAST_LOAD_TIMEOUT)
         val balancer = V2rayConfig.RoutingBean.BalancerBean(
             tag = balancerTag,
             selector = selector,
+            fallbackTag = fallbackTag,
             strategy = V2rayConfig.RoutingBean.StrategyObject(type = strategyType.policyGroupType)
         )
-        val observatory = if (strategyType.requiresObservatory) {
+        val observatory = if (strategyType.requiresObservatory || fallbackTag != null) {
             V2rayConfig.ObservatoryObject(
                 subjectSelector = selector,
                 probeUrl = probeUrl,
-                probeInterval = "3m",
+                probeInterval = leastPingInterval,
                 enableConcurrency = true
             )
         } else null
@@ -1203,13 +1219,31 @@ object CoreConfigManager {
                 subjectSelector = selector,
                 pingConfig = V2rayConfig.BurstObservatoryObject.PingConfigObject(
                     destination = probeUrl,
-                    interval = "5m",
-                    sampling = 2,
-                    timeout = "30s"
+                    httpMethod = leastLoadMethod,
+                    interval = leastLoadInterval,
+                    sampling = leastLoadSampling,
+                    timeout = leastLoadTimeout
                 )
             )
         } else null
         return BalancerStrategy(balancer, observatory, burstObservatory)
+    }
+
+    private fun decodeObservatoryDuration(key: String, default: String): String {
+        val value = MmkvManager.decodeSettingsString(key)?.trim()
+        return if (!value.isNullOrEmpty() && AppConfig.OBSERVATORY_DURATION_PATTERN.matches(value)) {
+            value
+        } else {
+            default
+        }
+    }
+
+    private fun decodeObservatorySampling(): Int {
+        return MmkvManager.decodeSettingsString(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_SAMPLING)
+            ?.trim()
+            ?.toIntOrNull()
+            ?.takeIf { it > 0 }
+            ?: AppConfig.OBSERVATORY_LEAST_LOAD_SAMPLING.toInt()
     }
 
     /**
