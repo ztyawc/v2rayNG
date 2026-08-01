@@ -13,8 +13,10 @@ android {
         applicationId = "com.v2ray.ang"
         minSdk = 24
         targetSdk = 37
-        versionCode = 739
-        versionName = "2.2.7.2"
+        // Keep this greater than both the prior telecom build and upstream 2.3.1.
+        // The telecom flavor's ABI-specific code is derived from this value.
+        versionCode = 742
+        versionName = "2.3.1.1"
         multiDexEnabled = true
         buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/2dust/v2rayNG/releases\"")
         buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s_%s.apk\"")

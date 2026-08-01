@@ -9,7 +9,7 @@
         android:shortcutShortLabel="@string/app_widget_name">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetClass="com.v2ray.ang.ui.ScSwitchActivity"
+            android:targetClass="com.v2ray.ang.ui.shortcut.ScSwitchActivity"
             android:targetPackage="com.v2ray.ang.telecom" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>
@@ -22,7 +22,7 @@
         android:shortcutShortLabel="@string/menu_item_import_config_qrcode">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetClass="com.v2ray.ang.ui.ScScannerActivity"
+            android:targetClass="com.v2ray.ang.ui.shortcut.ScScannerActivity"
             android:targetPackage="com.v2ray.ang.telecom" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>
@@ -35,7 +35,7 @@
         android:shortcutShortLabel="@string/toast_services_start">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetClass="com.v2ray.ang.ui.ScStartActivity"
+            android:targetClass="com.v2ray.ang.ui.shortcut.ScStartActivity"
             android:targetPackage="com.v2ray.ang.telecom" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>
@@ -48,7 +48,7 @@
         android:shortcutShortLabel="@string/toast_services_stop">
         <intent
             android:action="android.intent.action.VIEW"
-            android:targetClass="com.v2ray.ang.ui.ScStopActivity"
+            android:targetClass="com.v2ray.ang.ui.shortcut.ScStopActivity"
             android:targetPackage="com.v2ray.ang.telecom" />
         <categories android:name="android.shortcut.conversation" />
     </shortcut>
