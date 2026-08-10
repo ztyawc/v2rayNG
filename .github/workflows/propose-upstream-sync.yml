@@ -147,6 +147,11 @@ jobs:
           sync_branch="$SYNC_BRANCH"
           upstream_sha="$UPSTREAM_SHA"
 
+          # git merge may need to create a merge commit before the explicit
+          # git commit below, so set the bot identity before invoking it.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git switch --create "$sync_branch"
           if ! git merge --no-ff --no-commit "upstream/$UPSTREAM_REF"; then
             git merge --abort || true
@@ -154,8 +159,6 @@ jobs:
             exit 1
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit --no-verify -m "chore(sync): merge $UPSTREAM_REPOSITORY@$upstream_sha"
           git push origin "HEAD:refs/heads/$sync_branch"
           echo "merge_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
