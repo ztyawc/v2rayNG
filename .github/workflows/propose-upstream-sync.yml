@@ -2,8 +2,9 @@ name: Propose upstream sync
 
 on:
   schedule:
-    # GitHub may delay scheduled jobs at the top of an hour, so use an offset.
-    - cron: "17 3 * * 1"
+    # Run on the first day of each month. The offset avoids the top-of-hour
+    # scheduling delay that GitHub Actions can experience.
+    - cron: "17 3 1 * *"
   workflow_dispatch:
     inputs:
       upstream_ref:
