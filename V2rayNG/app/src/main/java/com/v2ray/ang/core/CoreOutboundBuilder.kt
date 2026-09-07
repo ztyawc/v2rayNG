@@ -64,7 +64,7 @@ object CoreOutboundBuilder {
             if (muxEnabled) {
                 outbound.mux?.enabled = true
                 outbound.mux?.concurrency = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_CONCURRENCY, "8").orEmpty().toInt()
-                outbound.mux?.xudpConcurrency = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_XUDP_CONCURRENCY, "16").orEmpty().toInt()
+                outbound.mux?.xudpConcurrency = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_XUDP_CONCURRENCY, AppConfig.DEFAULT_MUX_XUDP_CONCURRENCY).orEmpty().toInt()
                 outbound.mux?.xudpProxyUDP443 = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_XUDP_QUIC, "reject")
                 if (protocol.equals(EConfigType.VLESS.name, true) && outbound.settings?.flow?.isNotEmpty() == true) {
                     outbound.mux?.concurrency = -1
@@ -426,6 +426,7 @@ object CoreOutboundBuilder {
                         )
                     )
                 }
+                udpMaskList.reverse()
                 streamSettings.finalmask = OutboundBean.StreamSettingsBean.FinalMaskBean(
                     udp = udpMaskList.toList()
                 )
@@ -665,8 +666,7 @@ object CoreOutboundBuilder {
                 JsonUtil.parseString(JsonUtil.toJson(existingFinalMask))
             } ?: JsonObject()
 
-            // finalmask.tcp / finalmask.udp are arrays; prepend mask at index 0.
-            fun prependMask(scope: String, mask: OutboundBean.StreamSettingsBean.FinalMaskBean.MaskBean) {
+            fun appendMask(scope: String, mask: OutboundBean.StreamSettingsBean.FinalMaskBean.MaskBean) {
                 val current = finalMaskObj.get(scope)
                 if (current != null && current.isJsonArray && current.asJsonArray.size() > 0) {
                     return
@@ -681,8 +681,8 @@ object CoreOutboundBuilder {
                 finalMaskObj.add(scope, newArray)
             }
 
-            prependMask("tcp", fragmentMask)
-            prependMask("udp", noiseMask)
+            appendMask("tcp", fragmentMask)
+            appendMask("udp", noiseMask)
             streamSettings.finalmask = finalMaskObj
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to update outbound fragment", e)
@@ -697,7 +697,7 @@ object CoreOutboundBuilder {
         }
 
         val domain = HttpUtil.toIdnDomain(profileItem.server.orEmpty())
-        if (MmkvManager.decodeSettingsString(AppConfig.PREF_OUTBOUND_DOMAIN_RESOLVE_METHOD, "1") != "2") {
+        if (MmkvManager.decodeSettingsString(AppConfig.PREF_OUTBOUND_DOMAIN_RESOLVE_METHOD, AppConfig.DEFAULT_OUTBOUND_DOMAIN_RESOLVE_METHOD) != "2") {
             return domain
         }
         //Resolve and replace domain

@@ -1,25 +1,24 @@
 package com.v2ray.ang.ui.compose
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.Drawable
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsBottomHeight
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.Checkbox
@@ -45,17 +44,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.v2ray.ang.R
+import com.v2ray.ang.util.AppIconFetcher
 import sh.calvin.reorderable.ReorderableCollectionItemScope
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -92,7 +95,7 @@ fun AppTopBar(
                     IconButton(onClick = if (isSearchActive) onSearchClose else onBackClick) {
                         Icon(
                             painter = painterResource(R.drawable.ic_arrow_back_24dp),
-                            contentDescription = "Back"
+                            contentDescription = stringResource(R.string.acc_back)
                         )
                     }
                 }
@@ -110,7 +113,7 @@ fun AppTopBar(
             enter = expandVertically(),
             exit = shrinkVertically()
         ) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = colorFabActive)
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.secondary)
         }
     }
 }
@@ -163,6 +166,7 @@ fun AppListItem(
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -170,41 +174,26 @@ fun AppListItem(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (icon != null) {
-            when (icon) {
-                is Bitmap -> {
-                    Image(
-                        bitmap = icon.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.size(40.dp),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-
-                is Int -> {
-                    Image(
-                        painter = painterResource(id = icon),
-                        contentDescription = null,
-                        modifier = Modifier.size(40.dp),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-
-                is Drawable -> {
-                    val bitmap = remember(icon) { createBitmapFromDrawable(icon) }
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.size(40.dp),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-
-                else -> {
-                    Box(modifier = Modifier.size(40.dp))
-                }
+        val model = remember(icon, packageName) {
+            if (icon != null) {
+                icon
+            } else {
+                val data = "appicon:$packageName"
+                ImageRequest.Builder(context)
+                    .data(data)
+                    .fetcherFactory(AppIconFetcher.Factory(context))
+                    .build()
             }
         }
+
+        AsyncImage(
+            model = model,
+            contentDescription = null,
+            modifier = Modifier.size(40.dp),
+            contentScale = ContentScale.Fit,
+            error = painterResource(R.drawable.ic_image_24dp),
+            fallback = painterResource(R.drawable.ic_image_24dp)
+        )
         Spacer(modifier = Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -225,22 +214,9 @@ fun AppListItem(
         Checkbox(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = CheckboxDefaults.colors(checkedColor = colorFabActive)
+            colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.secondary)
         )
     }
-}
-
-private fun createBitmapFromDrawable(drawable: Drawable): Bitmap {
-    if (drawable is BitmapDrawable) {
-        return drawable.bitmap
-    }
-    val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: 96
-    val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: 96
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    drawable.setBounds(0, 0, canvas.width, canvas.height)
-    drawable.draw(canvas)
-    return bitmap
 }
 
 @Composable
@@ -252,6 +228,17 @@ fun ItemDivider() {
 fun AppDivider(modifier: Modifier = Modifier) {
     val color = if (LocalDarkTheme.current) dividerColorDark else dividerColorLight
     HorizontalDivider(modifier = modifier.fillMaxWidth(), thickness = 1.dp, color = color)
+}
+
+@Composable
+fun NavigationBarsSpacer(modifier: Modifier = Modifier) {
+    Spacer(modifier = modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
+}
+
+@Composable
+fun NavigationBarsBottomPadding(): PaddingValues {
+    val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    return PaddingValues(bottom = bottom)
 }
 
 @Composable

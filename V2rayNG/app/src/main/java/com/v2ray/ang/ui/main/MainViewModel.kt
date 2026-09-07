@@ -6,12 +6,14 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
+import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.GroupMapItem
 import com.v2ray.ang.dto.LocateTarget
 import com.v2ray.ang.dto.TestServiceMessage
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.ServersCache
 import com.v2ray.ang.dto.entities.SubscriptionCache
+import com.v2ray.ang.extension.delay
 import com.v2ray.ang.extension.isComplexType
 import com.v2ray.ang.extension.matchesPattern
 import com.v2ray.ang.extension.moveItem
@@ -23,11 +25,13 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -45,15 +49,11 @@ class MainViewModel(
     private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
     private val preloadDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
 
-    private val disconnectedText: String = dataSource.getString(R.string.connection_not_connected)
-    private val connectedText: String = dataSource.getString(R.string.connection_connected)
-
     // ---------- UI state ----------
     private val _uiState = MutableStateFlow(
         MainUiState(
             selectedGroupId = dataSource.getSelectedSubscriptionId(),
             selectedGuid = dataSource.getSelectServer(),
-            statusText = disconnectedText,
             confirmRemove = dataSource.getConfirmRemove(),
             doubleColumnDisplay = dataSource.getDoubleColumnDisplay()
         )
@@ -68,7 +68,8 @@ class MainViewModel(
     // ---------- Groups & cache ----------
     private val cacheMutex = Mutex()
     private val groupDataCache = mutableMapOf<String, List<ServersCache>>()
-    private val groupPageFlows = ConcurrentHashMap<String, MutableStateFlow<List<ServersCache>>>()
+    private val groupUiFlows = ConcurrentHashMap<String, MutableStateFlow<ServerGroupUiState>>()
+    private val groupServerFlows = ConcurrentHashMap<String, StateFlow<List<ServersCache>>>()
     private val groupLoadMutexes = ConcurrentHashMap<String, Mutex>()
     private val serverOrderPersistenceJobs = mutableMapOf<String, Job>()
 
@@ -105,19 +106,14 @@ class MainViewModel(
                 updateRunningState(true)
             }
 
-            is MainServiceEvent.StateStartFailure -> {
-                val error = event.errorMessage
-                if (error.isNotBlank()) {
-                    toastError(error)
-                } else {
-                    toastError(R.string.toast_services_failure)
-                }
+            MainServiceEvent.StateStartFailure -> {
+                toastError(R.string.toast_services_failure)
                 updateRunningState(false)
             }
 
             MainServiceEvent.StateStopSuccess -> updateRunningState(false)
-            is MainServiceEvent.MeasureDelaySuccess -> {
-                _uiState.update { it.copy(statusText = event.content) }
+            is MainServiceEvent.MeasureDelayResult -> {
+                _uiState.update { it.copy(status = MainStatus.ConnectionTest(event.result)) }
             }
 
             MainServiceEvent.MeasureConfigSuccess -> {
@@ -129,34 +125,67 @@ class MainViewModel(
             }
 
             is MainServiceEvent.MeasureConfigNotify -> {
-                _uiState.update {
-                    it.copy(
-                        statusText = dataSource.getString(
-                            R.string.connection_runing_task_left,
-                            event.progress
-                        )
-                    )
-                }
+                _uiState.update { it.copy(status = MainStatus.TestProgress(event.progress)) }
             }
 
             is MainServiceEvent.MeasureConfigFinish -> {
-                if (event.finishedCount == "0") {
-                    onTestsFinished()
-                }
+                onTestsFinished()
             }
         }
     }
 
+    internal fun formatStatus(status: MainStatus): String = when (status) {
+        MainStatus.Disconnected -> dataSource.getString(R.string.connection_not_connected)
+        MainStatus.Connected -> dataSource.getString(R.string.connection_connected)
+        MainStatus.Testing -> dataSource.getString(R.string.connection_test_testing)
+        is MainStatus.TestProgress -> dataSource.getString(
+            R.string.connection_running_task_left,
+            status.progress
+        )
+
+        is MainStatus.ConnectionTest -> formatConnectionTestResult(status.result)
+    }
+
+    private fun formatConnectionTestResult(result: ConnectionTestResult): String {
+        val status = if (result.delayMillis >= 0) {
+            val delay = dataSource.getString(R.string.server_test_delay_value, result.delayMillis)
+            dataSource.getString(R.string.connection_test_available, delay)
+        } else {
+            val detail = result.errorMessage.ifBlank {
+                dataSource.getString(R.string.connection_test_empty_message)
+            }
+            dataSource.getString(R.string.connection_test_error, detail)
+        }
+
+        if (result.delayMillis < 0 || (result.country == null && result.ipAddress == null)) {
+            return status
+        }
+
+        val unknown = dataSource.getString(R.string.value_unknown)
+        return "$status\n(${result.country ?: unknown}) ${result.ipAddress ?: unknown}"
+    }
+
     // ---------- Public state accessors ----------
     fun serversForGroup(groupId: String): StateFlow<List<ServersCache>> =
-        groupPageFlows.computeIfAbsent(groupId) { MutableStateFlow(emptyList()) }
-            .asStateFlow()
+        groupServerFlows.computeIfAbsent(groupId) {
+            val groupState = mutableServerGroupState(groupId)
+            groupState
+                .map { it.servers }
+                .stateIn(
+                    scope = viewModelScope,
+                    started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 5_000),
+                    initialValue = groupState.value.servers,
+                )
+        }
 
-    private fun mutableServersForGroup(groupId: String): MutableStateFlow<List<ServersCache>> =
-        groupPageFlows.computeIfAbsent(groupId) { MutableStateFlow(emptyList()) }
+    internal fun serverGroupState(groupId: String): StateFlow<ServerGroupUiState> =
+        mutableServerGroupState(groupId).asStateFlow()
+
+    private fun mutableServerGroupState(groupId: String): MutableStateFlow<ServerGroupUiState> =
+        groupUiFlows.computeIfAbsent(groupId) { MutableStateFlow(ServerGroupUiState()) }
 
     private fun currentServers(): List<ServersCache> =
-        mutableServersForGroup(uiState.value.selectedGroupId).value
+        mutableServerGroupState(uiState.value.selectedGroupId).value.servers
 
     // ---------- Action handler ----------
     fun onAction(action: MainAction) {
@@ -177,7 +206,7 @@ class MainViewModel(
             is MainAction.RemoveServer -> removeServerAndRefresh(action.guid)
             is MainAction.Search -> filterConfig(action.query)
             is MainAction.ImportBatchConfig -> importBatchConfig(action.configText)
-            is MainAction.LocateHandled -> consumeLocateTarget(action.target)
+            MainAction.LocateHandled -> consumeLocateTarget()
             is MainAction.ShareQRCode -> {
                 val bitmap = dataSource.share2QRCode(action.guid)
                 _uiState.update { it.copy(shareQRCodeBitmap = bitmap) }
@@ -208,7 +237,7 @@ class MainViewModel(
         viewModelScope.launch(preloadDispatcher) {
             try {
                 initialPageReady.await()
-                delay(32L)
+                delay(32)
                 dataSource.initAssets()
                 dataSource.syncSubscriptions()
             } catch (cancelled: CancellationException) {
@@ -237,8 +266,7 @@ class MainViewModel(
             ServersCache(
                 guid = guid,
                 profile = profile.copy(),
-                testDelayMillis = affiliation?.testDelayMillis ?: 0L,
-                testDelayString = affiliation?.getTestDelayString().orEmpty()
+                testDelayMillis = affiliation?.testDelayMillis ?: 0L
             )
         }
 
@@ -276,7 +304,31 @@ class MainViewModel(
     }
 
     private fun updateGroupUi(groupId: String, servers: List<ServersCache>) {
-        mutableServersForGroup(groupId).value = applyKeywordFilter(servers)
+        val filteredServers = applyKeywordFilter(servers)
+        mutableServerGroupState(groupId).value = ServerGroupUiState(
+            servers = filteredServers,
+            rows = buildServerRows(groupId, filteredServers)
+        )
+    }
+
+    private fun buildServerRows(groupId: String, servers: List<ServersCache>): List<ServerRowUiModel> {
+        val subscriptionRemarks = if (groupId.isEmpty()) {
+            servers.asSequence()
+                .map { it.profile.subscriptionId }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .associateWith { subscriptionId ->
+                    dataSource.getSubscriptionItem(subscriptionId)?.remarks.orEmpty()
+                }
+        } else {
+            emptyMap()
+        }
+        return servers.map { server ->
+            buildServerRowUiModel(
+                server = server,
+                subscriptionRemarks = subscriptionRemarks[server.profile.subscriptionId].orEmpty()
+            )
+        }
     }
 
     fun getSubscriptions(): List<SubscriptionCache> = dataSource.getSubscriptions()
@@ -321,17 +373,18 @@ class MainViewModel(
                 }
                 val selectedGroup = resolveSelectedGroup(groups)
                 val validIds = groups.mapTo(HashSet()) { it.id }
-                groupPageFlows.keys.removeAll { it !in validIds }
+                groupUiFlows.keys.removeAll { it !in validIds }
+                groupServerFlows.keys.removeAll { it !in validIds }
                 groupLoadMutexes.keys.removeAll { it !in validIds }
 
                 _uiState.update {
                     it.copy(
                         groups = groups,
                         selectedGroupId = selectedGroup,
-                        selectedGuid = dataSource.getSelectServer()
+                        selectedGuid = dataSource.getSelectServer(),
                     )
                 }
-                groups.forEach { mutableServersForGroup(it.id) }
+                groups.forEach { mutableServerGroupState(it.id) }
 
                 if (groups.isEmpty()) {
                     cacheMutex.withLock { groupDataCache.clear() }
@@ -351,7 +404,7 @@ class MainViewModel(
                 preloadJob = viewModelScope.launch(preloadDispatcher) {
                     preloadOrder.forEach { groupId ->
                         ensureActive()
-                        delay(32L)
+                        delay(32)
                         val servers = loadGroup(groupId, forceRefresh)
                         updateGroupUi(groupId, servers)
                     }
@@ -569,7 +622,7 @@ class MainViewModel(
 
     fun subscriptionIdChanged(id: String) {
         if (_uiState.value.groups.none { it.id == id }) return
-        mutableServersForGroup(id)
+        mutableServerGroupState(id)
         if (uiState.value.selectedGroupId != id) {
             dataSource.setSelectedSubscriptionId(id)
             _uiState.update { it.copy(selectedGroupId = id) }
@@ -604,7 +657,7 @@ class MainViewModel(
             }
             order.forEachIndexed { index, groupId ->
                 ensureActive()
-                if (index > 0) delay(32L)
+                if (index > 0) delay(32)
                 updateGroupUi(groupId, loadGroup(groupId, forceRefresh = true))
             }
         }
@@ -615,7 +668,7 @@ class MainViewModel(
         keywordFilter = keyword
         filterJob?.cancel()
         filterJob = viewModelScope.launch(defaultDispatcher) {
-            delay(300L)
+            delay(300)
             val snapshot = cacheMutex.withLock { groupDataCache.toMap() }
             ensureActive()
             snapshot.forEach { (groupId, servers) ->
@@ -647,10 +700,13 @@ class MainViewModel(
     }
 
     fun moveServer(groupId: String, fromPosition: Int, toPosition: Int) {
-        val servers = mutableServersForGroup(groupId).value.toMutableList()
+        val groupState = mutableServerGroupState(groupId).value
+        val servers = groupState.servers.toMutableList()
         if (!servers.moveItem(fromPosition, toPosition)) return
+        val rows = groupState.rows.toMutableList()
+        rows.moveItem(fromPosition, toPosition)
         val guids = servers.map { it.guid }
-        mutableServersForGroup(groupId).value = servers
+        mutableServerGroupState(groupId).value = ServerGroupUiState(servers, rows)
         // A drag emits several moves; serialize writes so an older order cannot overwrite a newer one.
         val previousPersistenceJob = serverOrderPersistenceJobs[groupId]
         serverOrderPersistenceJobs[groupId] = viewModelScope.launch(ioDispatcher) {
@@ -667,7 +723,7 @@ class MainViewModel(
         _uiState.update {
             it.copy(
                 isTesting = false,
-                statusText = if (it.isRunning) connectedText else disconnectedText
+                status = if (it.isRunning) MainStatus.Connected else MainStatus.Disconnected
             )
         }
     }
@@ -676,25 +732,38 @@ class MainViewModel(
         dataSource.cancelAllPing()
         val groupId = uiState.value.selectedGroupId
         val servers = currentServers()
-        dataSource.clearAllTestDelayResults(servers.map { it.guid })
         if (servers.isEmpty()) {
             _uiState.update { it.copy(isTesting = false) }
             return
+        }
+        val serverGuids = servers.map { it.guid }
+        mutableServerGroupState(groupId).update { current ->
+            current.copy(
+                servers = current.servers.map { server ->
+                    if (server.testDelayMillis == 0L) server
+                    else server.copy(testDelayMillis = 0L)
+                },
+                rows = current.rows.map { row ->
+                    if (row.testDelayMillis == 0L) row
+                    else row.copy(testDelayMillis = 0L)
+                }
+            )
         }
         testingGroupId = groupId
         _uiState.update {
             it.copy(
                 isTesting = true,
-                statusText = dataSource.getString(R.string.connection_test_testing)
+                status = MainStatus.Testing
             )
         }
         viewModelScope.launch(ioDispatcher) {
+            dataSource.clearAllTestDelayResults(serverGuids)
             cacheMutex.withLock { groupDataCache.remove(groupId) }
             dataSource.sendMsg2TestService(
                 TestServiceMessage(
                     key = AppConfig.MSG_MEASURE_CONFIG_START,
                     subscriptionId = groupId,
-                    serverGuids = if (keywordFilter.isNotEmpty()) servers.map { it.guid } else emptyList(),
+                    serverGuids = if (keywordFilter.isNotEmpty()) serverGuids else emptyList(),
                     onlyTcp = onlyTcp
                 )
             )
@@ -702,11 +771,7 @@ class MainViewModel(
     }
 
     fun testCurrentServerRealPing() {
-        _uiState.update {
-            it.copy(
-                statusText = dataSource.getString(R.string.connection_test_testing)
-            )
-        }
+        _uiState.update { it.copy(status = MainStatus.Testing) }
         dataSource.testCurrentServerRealPing()
     }
 
@@ -717,7 +782,7 @@ class MainViewModel(
             _uiState.update {
                 it.copy(
                     isTesting = false,
-                    statusText = if (it.isRunning) connectedText else disconnectedText
+                    status = if (it.isRunning) MainStatus.Connected else MainStatus.Disconnected
                 )
             }
             reloadAllGroups(_uiState.value.groups.map { it.id })
@@ -728,24 +793,21 @@ class MainViewModel(
         val selected = dataSource.getSelectServer() ?: return
         val profile = dataSource.decodeServerConfig(selected) ?: return
         val groupId = profile.subscriptionId
-        val groupIndex =
-            _uiState.value.groups.indexOfFirst { it.id == groupId }.takeIf { it >= 0 } ?: return
+        if (_uiState.value.groups.none { it.id == groupId }) return
         viewModelScope.launch(ioDispatcher) {
-            val position =
-                loadGroup(groupId).indexOfFirst { it.guid == selected }.takeIf { it >= 0 }
-                    ?: return@launch
+            updateGroupUi(groupId, loadGroup(groupId))
+            if (_uiState.value.selectedGroupId != groupId) {
+                dataSource.setSelectedSubscriptionId(groupId)
+            }
+            val target = LocateTarget(groupId, selected)
             _uiState.update {
-                it.copy(locateTarget = LocateTarget(groupId, groupIndex, position))
+                it.copy(selectedGroupId = groupId, locateTarget = target)
             }
         }
     }
 
-    fun getPosition(guid: String): Int = currentServers().indexOfFirst { it.guid == guid }
-
-    private fun consumeLocateTarget(target: LocateTarget) {
-        _uiState.update { state ->
-            if (state.locateTarget == target) state.copy(locateTarget = null) else state
-        }
+    private fun consumeLocateTarget() {
+        _uiState.update { it.copy(locateTarget = null) }
     }
 
     // ---------- Running state ----------
@@ -753,8 +815,8 @@ class MainViewModel(
         _uiState.update { state ->
             state.copy(
                 isRunning = running,
-                statusText = if (!clearTestingText && state.isTesting) state.statusText
-                else if (running) connectedText else disconnectedText
+                status = if (!clearTestingText && state.isTesting) state.status
+                else if (running) MainStatus.Connected else MainStatus.Disconnected
             )
         }
     }

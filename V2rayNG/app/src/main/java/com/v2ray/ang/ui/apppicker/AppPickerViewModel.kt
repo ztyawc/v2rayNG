@@ -5,6 +5,7 @@ import android.content.Context
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import com.v2ray.ang.dto.AppInfo
+import com.v2ray.ang.ui.AppSelection
 import com.v2ray.ang.ui.base.BaseViewModel
 import com.v2ray.ang.util.AppManagerUtil
 import com.v2ray.ang.util.LogUtil
@@ -40,16 +41,30 @@ class AppPickerViewModel(application: Application) : BaseViewModel(application) 
     }
 
     fun loadApps(context: Context) {
-        if (allApps != null || isAppListLoading) return
+        allApps?.let { apps ->
+            val localizedUnknownApp = getString(R.string.app_picker_unknown_app)
+            val updatedApps = apps.map { appInfo ->
+                if (appInfo.packageName == AppConfig.UNIDENTIFIED_PACKAGE) {
+                    appInfo.copy(appName = localizedUnknownApp)
+                } else {
+                    appInfo
+                }
+            }
+            allApps = sortApps(updatedApps)
+            _displayedApps.value = applyFilter(currentQuery)
+            return
+        }
+        if (isAppListLoading) return
 
         val applicationContext = context.applicationContext
+        val localizedUnknownApp = getString(R.string.app_picker_unknown_app)
         isAppListLoading = true
         launchLoading {
             try {
                 selectedSnapshot = _selectedPackages.value
                 val apps = withContext(Dispatchers.IO) {
                     val list = AppManagerUtil.loadNetworkAppList(applicationContext)
-                    val special = createSpecialItemUnidentified(applicationContext)
+                    val special = createSpecialItemUnidentified(localizedUnknownApp)
                     sortApps(list + special)
                 }
                 allApps = apps
@@ -80,15 +95,17 @@ class AppPickerViewModel(application: Application) : BaseViewModel(application) 
     }
 
     fun selectAll() {
-        val displayedPackages = _displayedApps.value.map { it.packageName }.toSet()
-        _selectedPackages.value = _selectedPackages.value + displayedPackages
+        val displayedApps = _displayedApps.value
+        val currentSelection = _selectedPackages.value
+        _selectedPackages.value = buildSet(currentSelection.size + displayedApps.size) {
+            addAll(currentSelection)
+            displayedApps.forEach { add(it.packageName) }
+        }
     }
 
     fun invertSelection() {
-        val current = _selectedPackages.value
-        val displayedPackages = _displayedApps.value.map { it.packageName }.toSet()
-        _selectedPackages.value = (current - displayedPackages) +
-                (displayedPackages - current)
+        val packageNames = _displayedApps.value.map { it.packageName }
+        _selectedPackages.value = AppSelection.invert(_selectedPackages.value, packageNames)
     }
 
     fun getSelectedPackages(): List<String> = _selectedPackages.value.sorted()
@@ -97,9 +114,9 @@ class AppPickerViewModel(application: Application) : BaseViewModel(application) 
         val apps = allApps ?: return emptyList()
         if (query.isBlank()) return apps
 
-        val key = query.uppercase()
         return apps.filter {
-            it.appName.uppercase().contains(key) || it.packageName.uppercase().contains(key)
+            it.appName.contains(query, ignoreCase = true) ||
+                    it.packageName.contains(query, ignoreCase = true)
         }
     }
 
@@ -119,14 +136,10 @@ class AppPickerViewModel(application: Application) : BaseViewModel(application) 
         }
     }
 
-    private fun createSpecialItemUnidentified(context: Context): AppInfo {
-        val icon = context.getDrawable(android.R.drawable.ic_menu_help)
-            ?: context.getDrawable(android.R.drawable.sym_def_app_icon)
-            ?: error("No fallback drawable available")
+    private fun createSpecialItemUnidentified(appName: String): AppInfo {
         return AppInfo(
-            appName = context.getString(R.string.app_picker_unknown_app),
+            appName = appName,
             packageName = AppConfig.UNIDENTIFIED_PACKAGE,
-            appIcon = icon,
             isSystemApp = false,
             isSelected = 0
         )

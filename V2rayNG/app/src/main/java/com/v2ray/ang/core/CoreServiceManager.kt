@@ -1,5 +1,6 @@
 package com.v2ray.ang.core
 
+import android.app.Activity
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -11,12 +12,13 @@ import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import androidx.core.content.ContextCompat
 import com.v2ray.ang.AppConfig
-import com.v2ray.ang.R
 import com.v2ray.ang.contracts.IDialerService
 import com.v2ray.ang.contracts.ServiceControl
+import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.OutboundTrafficStat
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.enums.BrowserDialerMode
+import com.v2ray.ang.extension.delay
 import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.NotificationManager
@@ -31,7 +33,6 @@ import com.v2ray.ang.util.Utils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlin.jvm.Volatile
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.ProcessFinder
@@ -250,7 +251,7 @@ object CoreServiceManager {
         if (!isRunning()) return false
 
         return try {
-            val tunFd = tunFdForCore()
+            val tunFd = currentVpnInterface
 
             isReloading = true
             LogUtil.i(AppConfig.TAG, "StartCore-Manager: Core reload start...")
@@ -267,23 +268,6 @@ object CoreServiceManager {
             false
         } finally {
             isReloading = false
-        }
-    }
-
-    /**
-     * Returns the tun descriptor to hand to the core on a reload.
-     *
-     * With hev-socks5-tunnel the core is started without a tun and never touches the descriptor.
-     * Otherwise it closes the one it was given when it stops, which would take the VPN interface
-     * down, so it gets a duplicate to close instead.
-     */
-    private fun tunFdForCore(): ParcelFileDescriptor? {
-        val vpnInterface = currentVpnInterface ?: return null
-        return try {
-            if (SettingsManager.isUsingHevTun()) vpnInterface else vpnInterface.dup()
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to duplicate VPN interface", e)
-            throw e
         }
     }
 
@@ -338,30 +322,25 @@ object CoreServiceManager {
                 time = coreController.measureDelay(SettingsManager.getDelayTestUrl())
             } catch (e: Exception) {
                 LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to measure delay", e)
-                errorStr = e.message?.substringAfter("\":") ?: "empty message"
+                errorStr = e.message?.substringAfter("\":").orEmpty()
             }
             if (time == -1L) {
                 try {
                     time = coreController.measureDelay(SettingsManager.getDelayTestUrl(true))
                 } catch (e: Exception) {
                     LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to measure delay", e)
-                    errorStr = e.message?.substringAfter("\":") ?: "empty message"
+                    errorStr = e.message?.substringAfter("\":").orEmpty()
                 }
             }
 
-            val result = if (time >= 0) {
-                service.getString(R.string.connection_test_available, time)
-            } else {
-                service.getString(R.string.connection_test_error, errorStr)
-            }
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_SUCCESS, result)
-
-            // Only fetch IP info if the delay test was successful
-            if (time >= 0) {
-                SpeedtestManager.getRemoteIPInfo()?.let { ip ->
-                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_SUCCESS, "$result\n$ip")
-                }
-            }
+            val endpoint = if (time >= 0) SpeedtestManager.getRemoteIPInfo() else null
+            val result = ConnectionTestResult(
+                delayMillis = time,
+                errorMessage = errorStr,
+                country = endpoint?.country,
+                ipAddress = endpoint?.ipAddress,
+            )
+            MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_RESULT, result)
         }
     }
 
@@ -383,6 +362,7 @@ object CoreServiceManager {
          * @return 0 for success, any other value for failure.
          */
         override fun startup(): Long {
+            LogUtil.i(AppConfig.TAG, "StartCore-Manager: CoreCallback startup")
             return 0
         }
 
@@ -391,14 +371,8 @@ object CoreServiceManager {
          * @return 0 for success, any other value for failure.
          */
         override fun shutdown(): Long {
-            val serviceControl = serviceControl?.get() ?: return -1
-            return try {
-                serviceControl.stopService()
-                0
-            } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to stop service", e)
-                -1
-            }
+            LogUtil.i(AppConfig.TAG, "StartCore-Manager: CoreCallback shutdown")
+            return 0
         }
 
         /**
@@ -408,6 +382,7 @@ object CoreServiceManager {
          * @return Always returns 0.
          */
         override fun onEmitStatus(l: Long, s: String?): Long {
+            LogUtil.i(AppConfig.TAG, "StartCore-Manager: CoreCallback onEmitStatus $s")
             return 0
         }
     }
@@ -486,9 +461,20 @@ object CoreServiceManager {
 
                 AppConfig.MSG_STATE_RESTART -> {
                     LogUtil.i(AppConfig.TAG, "StartCore-Manager: Restart service")
-                    serviceControl.stopService()
-                    Thread.sleep(500L)
-                    LauncherManager.startService(serviceControl.getService())
+                    // The UI and daemon run in separate processes, so acknowledge the active
+                    // daemon before stopping it instead of relying on possibly stale UI state.
+                    if (isOrderedBroadcast) resultCode = Activity.RESULT_OK
+
+                    val pendingResult = goAsync()
+                    CoroutineScope(Dispatchers.Default).launch {
+                        try {
+                            serviceControl.stopService()
+                            delay(500L)
+                            LauncherManager.startService(serviceControl.getService())
+                        } finally {
+                            pendingResult.finish()
+                        }
+                    }
                 }
 
                 AppConfig.MSG_MEASURE_DELAY -> {

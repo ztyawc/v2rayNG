@@ -13,9 +13,11 @@ import com.v2ray.ang.ui.base.BaseViewModel
 import com.v2ray.ang.ui.base.ViewModelEvent
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.ZipUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -35,6 +37,24 @@ class BackupViewModel(application: Application) : BaseViewModel(application) {
         MmkvManager.encodeWebDavConfig(config)
         _webDavConfig.value = config
         toastSuccess(R.string.toast_success)
+    }
+
+    fun cleanupProfileStorage() {
+        launchLoading {
+            try {
+                val removed = withContext(Dispatchers.IO) {
+                    MmkvManager.removeOrphanedServerProfiles()
+                }
+                if (removed == null) {
+                    toastError(R.string.toast_profile_storage_cleanup_skipped)
+                } else {
+                    toastSuccess(getString(R.string.toast_profile_storage_cleanup, removed))
+                }
+            } catch (e: Exception) {
+                LogUtil.e(AppConfig.TAG, "Failed to clean up profile storage", e)
+                toastError(R.string.toast_failure)
+            }
+        }
     }
 
     fun shareBackup(cacheDir: File, appName: String) {
@@ -165,17 +185,20 @@ class BackupViewModel(application: Application) : BaseViewModel(application) {
         }
     }
 
-    private fun performRestore(cacheDir: File, zipFile: File): Boolean {
-        val backupDir = cacheDir.absolutePath + "/${System.currentTimeMillis()}"
+    private suspend fun performRestore(cacheDir: File, zipFile: File): Boolean =
+        withContext(Dispatchers.IO) {
+            val backupDir = File(cacheDir, "restore_${System.nanoTime()}")
+            try {
+                if (!ZipUtil.unzipToFolder(zipFile, backupDir.absolutePath)) {
+                    return@withContext false
+                }
 
-        if (!ZipUtil.unzipToFolder(zipFile, backupDir)) {
-            return false
+                val count = MMKV.restoreAllFromDirectory(backupDir.absolutePath)
+                SettingsChangeManager.makeSetupGroupTab()
+                SettingsChangeManager.makeRestartService()
+                count > 0
+            } finally {
+                backupDir.deleteRecursively()
+            }
         }
-
-        val count = MMKV.restoreAllFromDirectory(backupDir)
-        SettingsChangeManager.makeSetupGroupTab()
-        SettingsChangeManager.makeRestartService()
-
-        return count > 0
-    }
 }

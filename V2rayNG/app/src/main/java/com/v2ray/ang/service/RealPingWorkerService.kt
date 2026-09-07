@@ -15,10 +15,28 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+
+internal object RealPingExecutionLimiter {
+    private val customConfigMutex = Mutex()
+
+    suspend fun <T> run(configType: EConfigType, block: () -> T): T {
+        // Custom profiles bypass speed-test trimming and start complete Xray configs.
+        // Parallel teardown can abort the native probe process, so serialize their
+        // JNI measurements globally across batches.
+        return if (configType == EConfigType.CUSTOM) {
+            customConfigMutex.withLock { block() }
+        } else {
+            block()
+        }
+    }
+}
 
 /**
  * Worker that runs a batch of real-ping tests independently.
@@ -45,13 +63,17 @@ class RealPingWorkerService(
                 runningCount.incrementAndGet()
                 try {
                     val result = if (onlyTcp) startTcping(guid) else startRealPing(guid)
-                    onEvent(RealPingEvent.Result(guid, result))
+                    if (scope.isActive) {
+                        onEvent(RealPingEvent.Result(guid, result))
+                    }
                 } catch (_: Throwable) {
                     // ignore
                 } finally {
                     val count = totalCount.decrementAndGet()
                     val left = runningCount.decrementAndGet()
-                    onEvent(RealPingEvent.Progress("$left / $count"))
+                    if (scope.isActive) {
+                        onEvent(RealPingEvent.Progress("$left / $count"))
+                    }
                 }
             }
         }
@@ -59,9 +81,11 @@ class RealPingWorkerService(
         scope.launch {
             try {
                 joinAll(*jobs.toTypedArray())
-                onEvent(RealPingEvent.Finish("0"))
+                if (isActive) {
+                    onEvent(RealPingEvent.Finish("0"))
+                }
             } catch (_: CancellationException) {
-                onEvent(RealPingEvent.Finish("-1"))
+                // If cancelled, don't send finish event to avoid confusion
             } finally {
                 close()
             }
@@ -80,7 +104,7 @@ class RealPingWorkerService(
         }
     }
 
-    private fun startRealPing(guid: String): Long {
+    private suspend fun startRealPing(guid: String): Long {
         val retFailure = -1L
 
         val config = MmkvManager.decodeServerConfig(guid) ?: return retFailure
@@ -103,7 +127,9 @@ class RealPingWorkerService(
         if (!configResult.status) {
             return retFailure
         }
-        return CoreNativeManager.measureOutboundDelay(configResult.content, SettingsManager.getDelayTestUrl())
+        return RealPingExecutionLimiter.run(config.configType) {
+            CoreNativeManager.measureOutboundDelay(configResult.content, SettingsManager.getDelayTestUrl())
+        }
     }
 
     private fun startTcping(guid: String): Long {
@@ -113,7 +139,7 @@ class RealPingWorkerService(
         if (!config.configType.isComplexType()
             && config.configType != EConfigType.HYSTERIA2
             && config.configType != EConfigType.WIREGUARD
-            && config.alpn?.startsWith("h3") != true
+            && config.alpn?.split(',')?.all { it.trim().startsWith("h3") } != true
             && config.server.isNotNullEmpty()
             && config.serverPort?.toIntOrNull() != null
         ) {
