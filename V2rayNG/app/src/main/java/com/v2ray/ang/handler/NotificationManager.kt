@@ -15,13 +15,13 @@ import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
 import com.v2ray.ang.core.CoreServiceManager
 import com.v2ray.ang.dto.entities.ProfileItem
+import com.v2ray.ang.extension.delay
 import com.v2ray.ang.extension.toSpeedString
 import com.v2ray.ang.ui.main.MainActivity
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.min
@@ -248,7 +248,8 @@ object NotificationManager {
                     }
                 }
 
-                stat.tag.startsWith(AppConfig.TAG_PROXY) -> {
+                // Accumulate stats for all proxy outbounds (including custom subscription tags)
+                stat.tag != AppConfig.TAG_BLOCKED -> {
                     when (stat.direction) {
                         AppConfig.UPLINK -> proxyUplink += stat.value
                         AppConfig.DOWNLINK -> proxyDownlink += stat.value

@@ -3,9 +3,12 @@ package com.v2ray.ang.ui.server
 import android.os.Bundle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -13,7 +16,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -40,7 +42,6 @@ import com.v2ray.ang.enums.NetworkType
 import com.v2ray.ang.extension.nullIfBlank
 import com.v2ray.ang.extension.toast
 import com.v2ray.ang.extension.toastSuccess
-import com.v2ray.ang.fmt.CmccSocksFmt
 import com.v2ray.ang.handler.AngConfigManager
 import com.v2ray.ang.handler.CertificateFingerprintManager
 import com.v2ray.ang.handler.MmkvManager
@@ -51,7 +52,6 @@ import com.v2ray.ang.ui.compose.FormDropdownField
 import com.v2ray.ang.ui.compose.FormTextField
 import com.v2ray.ang.ui.compose.SettingsSwitchItem
 import com.v2ray.ang.ui.compose.verticalScrollbar
-import com.v2ray.ang.util.HttpHeaderParser
 import com.v2ray.ang.util.JsonUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -114,7 +114,6 @@ class ServerActivity : BaseComponentActivity() {
         if (
             config.configType != EConfigType.SOCKS &&
             config.configType != EConfigType.HTTP &&
-            config.configType != EConfigType.PRIVATE_SOCKS &&
             config.password.isNullOrBlank()
         ) {
             val message = when (config.configType) {
@@ -126,21 +125,6 @@ class ServerActivity : BaseComponentActivity() {
             }
             toast(message)
             return false
-        }
-
-        if (config.configType == EConfigType.PRIVATE_SOCKS) {
-            if (config.username.isNullOrBlank()) {
-                toast(R.string.server_lab_cmcc_username)
-                return false
-            }
-            if (config.password.isNullOrBlank()) {
-                toast(R.string.server_lab_cmcc_password)
-                return false
-            }
-            if (CmccSocksFmt.normalizeCmccProtocol(config.cmccProtocol) == null) {
-                toast(R.string.server_lab_cmcc_protocol)
-                return false
-            }
         }
 
         if (
@@ -238,7 +222,6 @@ fun ServerScreen(
     val uTlsOptions = stringArrayResource(R.array.streamsecurity_utls).toList()
     val alpnOptions = stringArrayResource(R.array.streamsecurity_alpn).toList()
     val browserDialerOptions = stringArrayResource(R.array.browser_dialer_mode_value).toList()
-    val cmccProtocolOptions = stringArrayResource(R.array.cmcc_protocols).toList()
 
     var remarks by rememberSaveable { mutableStateOf(initialConfig.remarks) }
     var address by rememberSaveable { mutableStateOf(initialConfig.server ?: "") }
@@ -248,12 +231,6 @@ fun ServerScreen(
     var flow by rememberSaveable { mutableStateOf(initialConfig.flow ?: "") }
     var encryption by rememberSaveable { mutableStateOf(initialConfig.method ?: "") }
     var username by rememberSaveable { mutableStateOf(initialConfig.username ?: "") }
-    var cmccProtocol by rememberSaveable {
-        mutableStateOf(initialConfig.cmccProtocol ?: cmccProtocolOptions.firstOrNull().orEmpty())
-    }
-    var httpHeadersText by rememberSaveable {
-        mutableStateOf(HttpHeaderParser.format(initialConfig.httpHeaders))
-    }
     var secretKey by rememberSaveable { mutableStateOf(initialConfig.secretKey ?: "") }
     var publicKey by rememberSaveable { mutableStateOf(initialConfig.publicKey ?: "") }
     var preSharedKey by rememberSaveable { mutableStateOf(initialConfig.preSharedKey ?: "") }
@@ -298,7 +275,6 @@ fun ServerScreen(
     val isVless = configType == EConfigType.VLESS
     val isShadowsocks = configType == EConfigType.SHADOWSOCKS
     val isSocksOrHttp = configType == EConfigType.SOCKS || configType == EConfigType.HTTP
-    val isPrivateSocks = configType == EConfigType.PRIVATE_SOCKS
     val isTrojan = configType == EConfigType.TROJAN
     val isWireguard = configType == EConfigType.WIREGUARD
     val isHysteria2 = configType == EConfigType.HYSTERIA2
@@ -319,13 +295,7 @@ fun ServerScreen(
             else -> null
         },
         flow = if (isVless) flow else null,
-        username = if (isSocksOrHttp || isPrivateSocks) username else null,
-        cmccProtocol = if (isPrivateSocks) cmccProtocol else null,
-        httpHeaders = if (configType == EConfigType.HTTP) {
-            HttpHeaderParser.parse(httpHeadersText).headers.takeIf { it.isNotEmpty() }
-        } else {
-            null
-        },
+        username = if (isSocksOrHttp) username else null,
         secretKey = if (isWireguard) secretKey else null,
         publicKey = when {
             isWireguard -> publicKey
@@ -370,48 +340,22 @@ fun ServerScreen(
         pinnedCA256 = pinnedCA256
     )
 
-    fun saveProfile() {
-        if (configType == EConfigType.HTTP) {
-            val result = HttpHeaderParser.parse(httpHeadersText)
-            val error = result.error
-            if (error != null) {
-                val message = when (error.type) {
-                    HttpHeaderParser.ErrorType.MISSING_COLON -> R.string.server_lab_http_headers_missing_colon
-                    HttpHeaderParser.ErrorType.INVALID_NAME -> R.string.server_lab_http_headers_invalid_name
-                    HttpHeaderParser.ErrorType.INVALID_VALUE -> R.string.server_lab_http_headers_invalid_value
-                    HttpHeaderParser.ErrorType.DUPLICATE_NAME -> R.string.server_lab_http_headers_duplicate_name
-                }
-                context.toast(
-                    context.getString(
-                        R.string.server_lab_http_headers_invalid,
-                        error.lineNumber,
-                        context.getString(message)
-                    )
-                )
-                return
-            }
-        }
-        onSave(buildProfileItem())
-    }
-
     Scaffold(
-        contentWindowInsets = ScaffoldDefaults.contentWindowInsets,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(
-                title = if (isPrivateSocks) {
-                    stringResource(R.string.server_private_socks)
-                } else {
-                    configType.toString()
-                },
+                title = configType.toString(),
                 onBackClick = onBackClick,
                 actions = {
                     if (guid.isNotEmpty() && !isRunning) {
                         IconButton(onClick = { showDeleteDialog = true }) {
-                            Icon(painterResource(R.drawable.ic_delete_24dp), stringResource(R.string.menu_item_del_config))
+                            Icon(painterResource(R.drawable.ic_delete_24dp), stringResource(R.string.acc_delete))
                         }
                     }
-                    IconButton(onClick = ::saveProfile) {
-                        Icon(painterResource(R.drawable.ic_fab_check), stringResource(R.string.menu_item_save_config))
+                    IconButton(onClick = {
+                        onSave(buildProfileItem())
+                    }) {
+                        Icon(painterResource(R.drawable.ic_fab_check), stringResource(R.string.acc_save))
                     }
                 }
             )
@@ -425,7 +369,7 @@ fun ServerScreen(
                 .consumeWindowInsets(innerPadding)
                 .imePadding()
                 .verticalScrollbar(listState),
-            contentPadding = PaddingValues(bottom = 36.dp),
+            contentPadding = PaddingValues(bottom = 36.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item { FormTextField(stringResource(R.string.server_lab_remarks), remarks, { remarks = it }) }
@@ -451,29 +395,6 @@ fun ServerScreen(
                 isSocksOrHttp -> {
                     item { FormTextField(stringResource(R.string.server_lab_security4), username, { username = it }) }
                     item { FormTextField(stringResource(R.string.server_lab_id4), password, { password = it }) }
-                }
-                isPrivateSocks -> {
-                    item { FormTextField(stringResource(R.string.server_lab_cmcc_username), username, { username = it }) }
-                    item { FormTextField(stringResource(R.string.server_lab_cmcc_password), password, { password = it }) }
-                    item {
-                        FormDropdownField(
-                            stringResource(R.string.server_lab_cmcc_protocol),
-                            cmccProtocol,
-                            cmccProtocolOptions,
-                            { cmccProtocol = it }
-                        )
-                    }
-                }
-            }
-            if (configType == EConfigType.HTTP) {
-                item {
-                    FormTextField(
-                        stringResource(R.string.server_lab_http_headers),
-                        httpHeadersText,
-                        { httpHeadersText = it },
-                        placeholder = stringResource(R.string.server_lab_http_headers_hint),
-                        maxLines = 8
-                    )
                 }
             }
             if (isVmess) item { FormDropdownField(stringResource(R.string.server_lab_security), method, securityOptions, { method = it }) }

@@ -1,9 +1,24 @@
 package com.v2ray.ang.ui.main
 
+import com.v2ray.ang.R
+import com.v2ray.ang.enums.EConfigType
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class MainImportMenuTest {
+
+    @Test
+    fun importMenuIncludesPrivateSocksAfterRegularSocks() {
+        assertEquals(ImportMenuAction.Socks.ordinal + 1, ImportMenuAction.PrivateSocks.ordinal)
+        assertEquals(
+            R.string.menu_item_import_config_manually_private_socks,
+            ImportMenuAction.PrivateSocks.labelRes,
+        )
+        assertEquals(
+            MainAction.ImportManually(EConfigType.PRIVATE_SOCKS.value),
+            ImportMenuAction.PrivateSocks.action,
+        )
+    }
 
     @Test
     fun regularShareMenuContainsOnlyShareActions() {

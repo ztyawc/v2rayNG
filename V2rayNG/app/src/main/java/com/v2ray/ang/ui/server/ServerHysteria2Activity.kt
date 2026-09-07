@@ -31,7 +31,7 @@ class ServerHysteria2Activity : BaseServerActivity() {
             title = serverConfigType.toString(),
             onSaveClick = { saveServer(uiState) }
         ) {
-            CommonBasicFields(uiState, showPort = false)
+            CommonBasicFields(uiState)
             Hysteria2ProtocolFields(uiState)
 
         }
@@ -92,9 +92,20 @@ class ServerHysteria2Activity : BaseServerActivity() {
             { state.sni = it }
         )
         FormTextField(
+            stringResource(R.string.server_lab_ech_config_list),
+            state.echConfigList,
+            { state.echConfigList = it }
+        )
+        FormTextField(
             stringResource(R.string.server_lab_pinned_ca256),
             state.pinnedCA256,
             { state.pinnedCA256 = it }
+        )
+
+        FormTextField(
+            stringResource(R.string.server_lab_final_mask),
+            state.finalMask,
+            { state.finalMask = it }
         )
     }
 }

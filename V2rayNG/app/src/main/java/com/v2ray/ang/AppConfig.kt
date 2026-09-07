@@ -56,7 +56,9 @@ object AppConfig {
     const val PREF_DOUBLE_COLUMN_DISPLAY = "pref_double_column_display"
     const val PREF_GROUP_ALL_DISPLAY = "pref_group_all_display"
     const val PREF_LANGUAGE = "pref_language"
+    const val PREF_APP_LOCALE_MIGRATED = "pref_app_locale_migrated"
     const val PREF_UI_MODE_NIGHT = "pref_ui_mode_night"
+    const val PREF_DYNAMIC_COLOR = "pref_dynamic_color"
     const val PREF_IPV6_ENABLED = "pref_ipv6_enabled"
     const val PREF_PREFER_IPV6 = "pref_prefer_ipv6"
     const val PREF_PROXY_SHARING = "pref_proxy_sharing_enabled"
@@ -166,6 +168,13 @@ object AppConfig {
     const val WIREGUARD_LOCAL_MTU = "1420"
     const val LOOPBACK = "127.0.0.1"
 
+    /** Shared defaults for settings shown in the UI and consumed by config generation. */
+    const val DEFAULT_SOCKS_ENABLE_UDP = true
+    const val DEFAULT_OUTBOUND_DOMAIN_RESOLVE_METHOD = "1"
+    const val DEFAULT_VPN_BYPASS_LAN = "1"
+    const val DEFAULT_HEV_TUNNEL_LOGLEVEL = "warn"
+    const val DEFAULT_MUX_XUDP_CONCURRENCY = "8"
+
     /** Message constants for communication. */
     const val MSG_REGISTER_CLIENT = 1
     const val MSG_STATE_RUNNING = 11
@@ -178,7 +187,7 @@ object AppConfig {
     const val MSG_STATE_STOP_SUCCESS = 41
     const val MSG_STATE_RESTART = 5
     const val MSG_MEASURE_DELAY = 6
-    const val MSG_MEASURE_DELAY_SUCCESS = 61
+    const val MSG_MEASURE_DELAY_RESULT = 61
     const val MSG_MEASURE_CONFIG_START = 7
     const val MSG_MEASURE_CONFIG_CANCEL = 71
     const val MSG_MEASURE_CONFIG_SUCCESS = 72

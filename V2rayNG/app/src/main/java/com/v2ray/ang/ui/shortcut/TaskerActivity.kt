@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -19,7 +20,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
@@ -34,14 +34,19 @@ import com.v2ray.ang.R
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.ui.base.BaseComponentActivity
 import com.v2ray.ang.ui.compose.AppTopBar
+import com.v2ray.ang.ui.compose.NavigationBarsBottomPadding
 import com.v2ray.ang.ui.compose.SettingsSwitchItem
 import com.v2ray.ang.ui.compose.verticalScrollbar
 import com.v2ray.ang.util.LogUtil
 
+data class TaskerItem(
+    val label: String,
+    val guid: String,
+)
+
 class TaskerActivity : BaseComponentActivity() {
 
-    private var lstData: ArrayList<String> = ArrayList()
-    private var lstGuid: ArrayList<String> = ArrayList()
+    private val items = mutableListOf<TaskerItem>()
 
     private val switchState = mutableStateOf(false)
     private val selectedPosition = mutableStateOf(-1)
@@ -49,13 +54,11 @@ class TaskerActivity : BaseComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        lstData.add("Default")
-        lstGuid.add(AppConfig.TASKER_DEFAULT_GUID)
+        items.add(TaskerItem(label = "Default", guid = AppConfig.TASKER_DEFAULT_GUID))
 
         MmkvManager.decodeAllServerList().forEach { key ->
             MmkvManager.decodeServerConfig(key)?.let { config ->
-                lstData.add(config.remarks)
-                lstGuid.add(key)
+                items.add(TaskerItem(label = config.remarks, guid = key))
             }
         }
 
@@ -65,7 +68,7 @@ class TaskerActivity : BaseComponentActivity() {
     @Composable
     override fun ScreenContent() {
         TaskerScreen(
-            items = lstData,
+            items = items,
             switchState = switchState,
             selectedPosition = selectedPosition,
             onBackClick = { finish() },
@@ -83,10 +86,7 @@ class TaskerActivity : BaseComponentActivity() {
                 return
             } else {
                 switchState.value = switch
-                val pos = lstGuid.indexOf(guid.toString())
-                if (pos >= 0) {
-                    selectedPosition.value = pos
-                }
+                selectedPosition.value = items.indexOfFirst { it.guid == guid.toString() }
             }
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to initialize Tasker settings", e)
@@ -101,15 +101,13 @@ class TaskerActivity : BaseComponentActivity() {
 
         val extraBundle = Bundle()
         extraBundle.putBoolean(AppConfig.TASKER_EXTRA_BUNDLE_SWITCH, switchState.value)
-        extraBundle.putString(AppConfig.TASKER_EXTRA_BUNDLE_GUID, lstGuid[position])
+        extraBundle.putString(AppConfig.TASKER_EXTRA_BUNDLE_GUID, items[position].guid)
         val intent = Intent()
 
-        val remarks = lstData[position]
-        val blurb = if (switchState.value) {
-            "Start $remarks"
-        } else {
-            "Stop $remarks"
-        }
+        val blurb = getString(
+            if (switchState.value) R.string.tasker_blurb_start else R.string.tasker_blurb_stop,
+            items[position].label
+        )
 
         intent.putExtra(AppConfig.TASKER_EXTRA_BUNDLE, extraBundle)
         intent.putExtra(AppConfig.TASKER_EXTRA_STRING_BLURB, blurb)
@@ -120,7 +118,7 @@ class TaskerActivity : BaseComponentActivity() {
 
 @Composable
 fun TaskerScreen(
-    items: List<String>,
+    items: List<TaskerItem>,
     switchState: MutableState<Boolean>,
     selectedPosition: MutableState<Int>,
     onBackClick: () -> Unit,
@@ -128,14 +126,14 @@ fun TaskerScreen(
 ) {
     val listState = rememberLazyListState()
     Scaffold(
-        contentWindowInsets = ScaffoldDefaults.contentWindowInsets,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(
                 title = "",
                 onBackClick = onBackClick,
                 actions = {
                     IconButton(onClick = onSave) {
-                        Icon(painterResource(R.drawable.ic_fab_check), contentDescription = stringResource(R.string.menu_item_save_config))
+                        Icon(painterResource(R.drawable.ic_fab_check), contentDescription = stringResource(R.string.acc_save))
                     }
                 }
             )
@@ -155,9 +153,10 @@ fun TaskerScreen(
                 state = listState,
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScrollbar(listState)
+                    .verticalScrollbar(listState),
+                contentPadding = NavigationBarsBottomPadding()
             ) {
-                itemsIndexed(items) { index, remarks ->
+                itemsIndexed(items, key = { _, item -> item.guid }) { index, item ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -170,7 +169,7 @@ fun TaskerScreen(
                             onClick = { selectedPosition.value = index }
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(text = remarks, style = MaterialTheme.typography.bodyLarge)
+                        Text(text = item.label, style = MaterialTheme.typography.bodyLarge)
                     }
                 }
             }

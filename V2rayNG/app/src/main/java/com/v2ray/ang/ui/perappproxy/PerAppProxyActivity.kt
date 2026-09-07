@@ -2,11 +2,13 @@ package com.v2ray.ang.ui.perappproxy
 
 import android.os.Bundle
 import androidx.activity.viewModels
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -15,13 +17,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -46,12 +45,21 @@ import com.v2ray.ang.extension.toastInfo
 import com.v2ray.ang.extension.toastSuccess
 import com.v2ray.ang.ui.base.BaseComponentActivity
 import com.v2ray.ang.ui.compose.AppDivider
+import com.v2ray.ang.ui.compose.AppDropdownMenuItems
 import com.v2ray.ang.ui.compose.AppListItem
 import com.v2ray.ang.ui.compose.AppTopBar
 import com.v2ray.ang.ui.compose.ItemDivider
-import com.v2ray.ang.ui.compose.colorFabActive
+import com.v2ray.ang.ui.compose.NavigationBarsBottomPadding
 import com.v2ray.ang.ui.compose.verticalScrollbar
 import com.v2ray.ang.util.Utils
+
+private enum class PerAppMenuAction(@StringRes val labelRes: Int) {
+    SelectAll(R.string.menu_item_select_all),
+    InvertSelection(R.string.menu_item_invert_selection),
+    SelectProxyApps(R.string.menu_item_select_proxy_app),
+    ImportSelection(R.string.menu_item_import_proxy_app),
+    ExportSelection(R.string.menu_item_export_proxy_app)
+}
 
 class PerAppProxyActivity : BaseComponentActivity() {
 
@@ -100,7 +108,6 @@ class PerAppProxyActivity : BaseComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PerAppProxyScreen(
     apps: List<AppInfo>,
@@ -125,12 +132,12 @@ fun PerAppProxyScreen(
     var showMenu by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(searchQuery) {
+    LaunchedEffect(Unit) {
         onSearch(searchQuery)
     }
 
     Scaffold(
-        contentWindowInsets = ScaffoldDefaults.contentWindowInsets,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(
                 title = stringResource(R.string.per_app_proxy_settings),
@@ -140,9 +147,11 @@ fun PerAppProxyScreen(
                 searchQuery = searchQuery,
                 onSearchQueryChange = { query ->
                     searchQuery = query
+                    onSearch(query)
                 },
                 onSearchClose = {
                     searchQuery = ""
+                    onSearch("")
                     showSearch = false
                 },
                 searchPlaceholder = stringResource(R.string.menu_item_search),
@@ -151,7 +160,7 @@ fun PerAppProxyScreen(
                         IconButton(onClick = { showSearch = true }) {
                             Icon(
                                 painterResource(R.drawable.ic_search_24dp),
-                                contentDescription = stringResource(R.string.menu_item_search)
+                                contentDescription = stringResource(R.string.acc_search)
                             )
                         }
                     }
@@ -159,7 +168,7 @@ fun PerAppProxyScreen(
                         IconButton(onClick = { showMenu = true }) {
                             Icon(
                                 painterResource(R.drawable.ic_more_vert_24dp),
-                                contentDescription = null
+                                contentDescription = stringResource(R.string.acc_more)
                             )
                         }
                         DropdownMenu(
@@ -167,26 +176,16 @@ fun PerAppProxyScreen(
                             onDismissRequest = { showMenu = false },
                             containerColor = MaterialTheme.colorScheme.surface
                         ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_select_all)) },
-                                onClick = { showMenu = false; onSelectAll() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_invert_selection)) },
-                                onClick = { showMenu = false; onInvertSelection() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_select_proxy_app)) },
-                                onClick = { showMenu = false; onSelectProxyAuto() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_import_proxy_app)) },
-                                onClick = { showMenu = false; onImportProxyApp() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_export_proxy_app)) },
-                                onClick = { showMenu = false; onExportProxyApp() }
-                            )
+                            AppDropdownMenuItems(PerAppMenuAction.entries, { it.labelRes }) { action ->
+                                showMenu = false
+                                when (action) {
+                                    PerAppMenuAction.SelectAll -> onSelectAll()
+                                    PerAppMenuAction.InvertSelection -> onInvertSelection()
+                                    PerAppMenuAction.SelectProxyApps -> onSelectProxyAuto()
+                                    PerAppMenuAction.ImportSelection -> onImportProxyApp()
+                                    PerAppMenuAction.ExportSelection -> onExportProxyApp()
+                                }
+                            }
                         }
                     }
                 }
@@ -225,7 +224,7 @@ fun PerAppProxyScreen(
                             onCheckedChange = onPerAppProxyChanged,
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = MaterialTheme.colorScheme.onSecondary,
-                                checkedTrackColor = colorFabActive
+                                checkedTrackColor = MaterialTheme.colorScheme.secondary
                             )
                         )
                     }
@@ -246,14 +245,14 @@ fun PerAppProxyScreen(
                             onCheckedChange = onBypassAppsChanged,
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = MaterialTheme.colorScheme.onSecondary,
-                                checkedTrackColor = colorFabActive
+                                checkedTrackColor = MaterialTheme.colorScheme.secondary
                             )
                         )
                     }
                     IconButton(onClick = onInfoClick) {
                         Icon(
                             painter = painterResource(R.drawable.ic_about_24dp),
-                            contentDescription = stringResource(R.string.summary_pref_per_app_proxy),
+                            contentDescription = stringResource(R.string.acc_per_app_proxy_information),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -265,14 +264,15 @@ fun PerAppProxyScreen(
                 state = listState,
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScrollbar(listState)
+                    .verticalScrollbar(listState),
+                contentPadding = NavigationBarsBottomPadding()
             ) {
                 items(items = apps, key = { it.packageName }) { app ->
                     val checked = blacklist.contains(app.packageName)
                     AppListItem(
                         appName = app.appName,
                         packageName = app.packageName,
-                        icon = app.appIcon,
+                        icon = null,
                         checked = checked,
                         onCheckedChange = { onToggleApp(app.packageName) }
                     )

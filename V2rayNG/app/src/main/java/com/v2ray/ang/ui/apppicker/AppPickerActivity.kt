@@ -4,21 +4,19 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.viewModels
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.ScaffoldDefaults
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,10 +31,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.v2ray.ang.R
 import com.v2ray.ang.dto.AppInfo
 import com.v2ray.ang.ui.base.BaseComponentActivity
+import com.v2ray.ang.ui.compose.AppDropdownMenuItems
 import com.v2ray.ang.ui.compose.AppListItem
 import com.v2ray.ang.ui.compose.AppTopBar
 import com.v2ray.ang.ui.compose.ItemDivider
+import com.v2ray.ang.ui.compose.NavigationBarsBottomPadding
 import com.v2ray.ang.ui.compose.verticalScrollbar
+
+private enum class AppPickerMenuAction(@StringRes val labelRes: Int) {
+    SelectAll(R.string.menu_item_select_all),
+    InvertSelection(R.string.menu_item_invert_selection)
+}
 
 class AppPickerActivity : BaseComponentActivity() {
 
@@ -101,7 +106,6 @@ class AppPickerActivity : BaseComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppPickerScreen(
     title: String,
@@ -119,12 +123,12 @@ fun AppPickerScreen(
     var showMenu by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(searchQuery) {
+    LaunchedEffect(Unit) {
         onSearch(searchQuery)
     }
 
     Scaffold(
-        contentWindowInsets = ScaffoldDefaults.contentWindowInsets,
+        contentWindowInsets = WindowInsets(0),
         topBar = {
             AppTopBar(
                 title = title,
@@ -134,9 +138,11 @@ fun AppPickerScreen(
                 searchQuery = searchQuery,
                 onSearchQueryChange = { query ->
                     searchQuery = query
+                    onSearch(query)
                 },
                 onSearchClose = {
                     searchQuery = ""
+                    onSearch("")
                     showSearch = false
                 },
                 searchPlaceholder = stringResource(R.string.menu_item_search),
@@ -145,7 +151,7 @@ fun AppPickerScreen(
                         IconButton(onClick = { showSearch = true }) {
                             Icon(
                                 painterResource(R.drawable.ic_search_24dp),
-                                contentDescription = stringResource(R.string.menu_item_search)
+                                contentDescription = stringResource(R.string.acc_search)
                             )
                         }
                     }
@@ -161,14 +167,13 @@ fun AppPickerScreen(
                             onDismissRequest = { showMenu = false },
                             containerColor = MaterialTheme.colorScheme.surface
                         ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_select_all)) },
-                                onClick = { showMenu = false; onSelectAll() }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.menu_item_invert_selection)) },
-                                onClick = { showMenu = false; onInvertSelection() }
-                            )
+                            AppDropdownMenuItems(AppPickerMenuAction.entries, { it.labelRes }) { action ->
+                                showMenu = false
+                                when (action) {
+                                    AppPickerMenuAction.SelectAll -> onSelectAll()
+                                    AppPickerMenuAction.InvertSelection -> onInvertSelection()
+                                }
+                            }
                         }
                     }
                 }
@@ -180,14 +185,15 @@ fun AppPickerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScrollbar(listState)
+                .verticalScrollbar(listState),
+            contentPadding = NavigationBarsBottomPadding()
         ) {
             items(items = apps, key = { it.packageName }) { app ->
                 val checked = selectedPackages.contains(app.packageName)
                 AppListItem(
                     appName = app.appName,
                     packageName = app.packageName,
-                    icon = app.appIcon,
+                    icon = null,
                     checked = checked,
                     onCheckedChange = { onToggleApp(app.packageName) }
                 )

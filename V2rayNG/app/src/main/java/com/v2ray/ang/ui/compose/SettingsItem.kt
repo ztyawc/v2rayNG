@@ -35,7 +35,7 @@ fun PreferenceGroupHeader(title: String, modifier: Modifier = Modifier) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleSmall,
-        color = colorFabActive,
+        color = MaterialTheme.colorScheme.secondary,
         modifier = modifier
             .fillMaxWidth()
             .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)
@@ -59,13 +59,13 @@ fun CollapsiblePreferenceGroupHeader(
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall,
-            color = colorFabActive,
+            color = MaterialTheme.colorScheme.secondary,
             modifier = Modifier.weight(1f)
         )
         Icon(
             painter = painterResource(R.drawable.ic_expand_more_24dp),
             contentDescription = null,
-            tint = colorFabActive,
+            tint = MaterialTheme.colorScheme.secondary,
             modifier = Modifier
                 .size(24.dp)
                 .rotate(if (expanded) 180f else 0f)
@@ -164,8 +164,8 @@ fun SettingsEditItem(
                 )
             ),
             onFieldChange = { _, v -> text = v },
-            confirmText = stringResource(android.R.string.ok),
-            dismissText = stringResource(android.R.string.cancel),
+            confirmText = stringResource(R.string.action_ok),
+            dismissText = stringResource(R.string.action_cancel),
             onConfirm = { showDialog = false; onValueChanged(text) },
             onDismiss = { showDialog = false }
         )
@@ -184,8 +184,9 @@ fun SettingsListItem(
     enabled: Boolean = true
 ) {
     var showDialog by remember { mutableStateOf(false) }
-    val selectedIndex = values.indexOf(selectedValue).let { if (it >= 0) it else 0 }
-    val summary = entries.getOrNull(selectedIndex).orEmpty()
+    val options = entries.zip(values)
+    val selectedOption = options.find { it.second == selectedValue } ?: options.firstOrNull()
+    val summary = selectedOption?.first.orEmpty()
 
     SettingsItemRow(
         icon = icon,
@@ -201,11 +202,12 @@ fun SettingsListItem(
     if (showDialog) {
         SelectListDialog(
             title = title,
-            options = entries,
-            selectedOption = summary,
-            onSelected = { index, _ ->
+            options = options,
+            optionText = { it.first },
+            selectedOption = selectedOption,
+            onSelected = { option ->
                 showDialog = false
-                values.getOrNull(index)?.let(onSelected)
+                onSelected(option.second)
             },
             onDismiss = { showDialog = false },
             showRadio = true
