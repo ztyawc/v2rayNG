@@ -21,6 +21,11 @@
         <item>2022-blake3-chacha20-poly1305</item>
     </string-array>
 
+    <string-array name="cmcc_protocols" translatable="false">
+        <item>0x80</item>
+        <item>0x82</item>
+    </string-array>
+
     <string-array name="networks" translatable="false">
         <item>tcp</item>
         <item>kcp</item>
@@ -70,6 +75,11 @@
         <item>1-5</item>
     </string-array>
 
+    <string-array name="observatory_least_load_method" translatable="false">
+        <item>HEAD</item>
+        <item>GET</item>
+    </string-array>
+
     <string-array name="streamsecurity_utls" translatable="false">
         <item />
         <item>chrome</item>
@@ -92,12 +102,6 @@
         <item>h3,h2,http/1.1</item>
         <item>h3,h2</item>
         <item>h2,http/1.1</item>
-    </string-array>
-
-    <string-array name="allowinsecures" translatable="false">
-        <item />
-        <item>true</item>
-        <item>false</item>
     </string-array>
 
     <string-array name="routing_domain_strategy" translatable="false">
@@ -206,7 +210,7 @@
         <item>6</item>
     </string-array>
 
-    <string-array name="vpn_interface_address">
+    <string-array name="vpn_interface_address" translatable="false">
         <item>10.10.14.x</item>
         <item>10.1.0.x</item>
         <item>10.0.0.x</item>

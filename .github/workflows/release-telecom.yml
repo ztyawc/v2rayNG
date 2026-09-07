@@ -1,0 +1,261 @@
+name: Release Telecom APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version tag matching the APK version, for example v2.3.1.1"
+        required: true
+        type: string
+      pre_release:
+        description: "Publish as a pre-release (normally used while following an upstream pre-release)"
+        required: false
+        default: false
+        type: boolean
+      release_notes:
+        description: "Optional release notes shown in the in-app update dialog"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-telecom-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # A Release must be built from the fork's reviewed default branch, never
+    # from an arbitrary workflow-dispatch ref or pull request branch.
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_PRE_RELEASE: ${{ inputs.pre_release }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+
+    steps:
+    - name: Validate release inputs and signing material
+      shell: bash
+      env:
+        TELECOM_KEYSTORE_BASE64: ${{ secrets.TELECOM_KEYSTORE_BASE64 }}
+        TELECOM_KEYSTORE_PASSWORD: ${{ secrets.TELECOM_KEYSTORE_PASSWORD }}
+        TELECOM_KEY_ALIAS: ${{ secrets.TELECOM_KEY_ALIAS }}
+        TELECOM_KEY_PASSWORD: ${{ secrets.TELECOM_KEY_PASSWORD }}
+        TELECOM_CERT_SHA256: ${{ secrets.TELECOM_CERT_SHA256 }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+          echo "::error::release_tag must be a numeric v-prefixed version, such as v2.2.7."
+          exit 1
+        fi
+        for name in TELECOM_KEYSTORE_BASE64 TELECOM_KEYSTORE_PASSWORD TELECOM_KEY_ALIAS TELECOM_KEY_PASSWORD TELECOM_CERT_SHA256; do
+          if [[ -z "${!name}" ]]; then
+            echo "::error::Missing required repository secret: $name"
+            exit 1
+          fi
+        done
+
+    - name: Checkout code
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+    - name: Install NDK
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --channel=0 --install "ndk;29.0.14206865"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+        sed -i '10i\
+        \
+            ndkVersion = "29.0.14206865"' "$GITHUB_WORKSPACE/V2rayNG/app/build.gradle.kts"
+
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: AndroidLibXrayLite/go.mod
+        cache-dependency-path: AndroidLibXrayLite/go.sum
+
+    - name: Install gomobile
+      shell: bash
+      run: |
+        set -euo pipefail
+        go install golang.org/x/mobile/cmd/gomobile@latest
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    - name: Restore cached libhevtun
+      id: cache-libhevtun-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ github.workspace }}/libs
+        key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+
+    - name: Build libhevtun
+      if: steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: bash compile-hevtun.sh
+
+    - name: Save libhevtun
+      if: steps.cache-libhevtun-restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ github.workspace }}/libs
+        key: libhevtun-${{ runner.os }}-${{ env.NDK_HOME }}-${{ hashFiles('.git/modules/hev-socks5-tunnel/HEAD') }}-${{ hashFiles('compile-hevtun.sh') }}
+
+    - name: Copy libhevtun
+      shell: bash
+      run: cp -r "$GITHUB_WORKSPACE/libs" "$GITHUB_WORKSPACE/V2rayNG/app"
+
+    - name: Build patched libv2ray
+      shell: bash
+      run: bash AndroidLibXrayLite/scripts/build-libv2ray-arm64.sh
+
+    - name: Setup Java
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Run Telecom update-checker unit tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE/V2rayNG"
+        echo "sdk.dir=${ANDROID_HOME}" > local.properties
+        chmod 755 gradlew
+        ./gradlew testTelecomDebugUnitTest -PABI_FILTERS=arm64-v8a \
+          --tests com.v2ray.ang.handler.UpdateCheckerManagerTest
+
+    - name: Decode Telecom signing key
+      id: android_keystore
+      shell: bash
+      env:
+        TELECOM_KEYSTORE_BASE64: ${{ secrets.TELECOM_KEYSTORE_BASE64 }}
+        TELECOM_KEYSTORE_PASSWORD: ${{ secrets.TELECOM_KEYSTORE_PASSWORD }}
+        TELECOM_KEY_ALIAS: ${{ secrets.TELECOM_KEY_ALIAS }}
+        TELECOM_CERT_SHA256: ${{ secrets.TELECOM_CERT_SHA256 }}
+      run: |
+        set -euo pipefail
+        keystore="$RUNNER_TEMP/telecom-release.keystore"
+        printf '%s' "$TELECOM_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+        test -s "$keystore"
+
+        keystore_cert_sha256="$(keytool -list -v \
+          -keystore "$keystore" \
+          -storepass "$TELECOM_KEYSTORE_PASSWORD" \
+          -alias "$TELECOM_KEY_ALIAS" 2>/dev/null | awk -F': ' '/SHA256:/ && !seen {print toupper($2); seen=1}' | tr -d ':')"
+        expected_cert_sha256="$(tr -d '[:space:]:' <<< "$TELECOM_CERT_SHA256" | tr '[:lower:]' '[:upper:]')"
+        test -n "$keystore_cert_sha256"
+        echo "Signing keystore certificate SHA-256: $keystore_cert_sha256"
+        if [[ "$keystore_cert_sha256" != "$expected_cert_sha256" ]]; then
+          echo "::error::Decoded signing keystore does not match TELECOM_CERT_SHA256."
+          exit 1
+        fi
+
+        echo "path=$keystore" >> "$GITHUB_OUTPUT"
+
+    - name: Build signed Telecom APK
+      shell: bash
+      env:
+        TELECOM_KEYSTORE_PASSWORD: ${{ secrets.TELECOM_KEYSTORE_PASSWORD }}
+        TELECOM_KEY_ALIAS: ${{ secrets.TELECOM_KEY_ALIAS }}
+        TELECOM_KEY_PASSWORD: ${{ secrets.TELECOM_KEY_PASSWORD }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE/V2rayNG"
+        echo "sdk.dir=${ANDROID_HOME}" > local.properties
+        chmod 755 gradlew
+        ./gradlew assembleTelecomRelease \
+          -PABI_FILTERS=arm64-v8a \
+          -Pandroid.injected.signing.store.file="${{ steps.android_keystore.outputs.path }}" \
+          -Pandroid.injected.signing.store.password="$TELECOM_KEYSTORE_PASSWORD" \
+          -Pandroid.injected.signing.key.alias="$TELECOM_KEY_ALIAS" \
+          -Pandroid.injected.signing.key.password="$TELECOM_KEY_PASSWORD"
+
+    - name: Verify APK identity, version and signer
+      id: verify_apk
+      shell: bash
+      env:
+        TELECOM_CERT_SHA256: ${{ secrets.TELECOM_CERT_SHA256 }}
+      run: |
+        set -euo pipefail
+        apk="$(find "$GITHUB_WORKSPACE/V2rayNG/app/build/outputs/apk/telecom/release" -type f -name 'v2rayNG_telecom_*_arm64-v8a.apk' -print -quit)"
+        test -n "$apk"
+
+        build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -n1)"
+        aapt="$ANDROID_HOME/build-tools/$build_tools/aapt"
+        apksigner="$ANDROID_HOME/build-tools/$build_tools/apksigner"
+        badging="$($aapt dump badging "$apk")"
+        grep -q "package: name='com.v2ray.ang.telecom'" <<< "$badging"
+        version_name="$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<< "$badging" | head -n1)"
+        test "$RELEASE_TAG" = "v$version_name"
+        signer_output="$("$apksigner" verify --verbose --print-certs "$apk")"
+        # Build-tools versions format this as either "Signer #1 certificate: ..."
+        # or "Signer #1: certificate ..."; the fingerprint is always the last field.
+        actual_cert_sha256="$(awk -F': ' '/certificate SHA-256 digest:/{print toupper($NF); exit}' <<< "$signer_output")"
+        expected_cert_sha256="$(tr -d '[:space:]:' <<< "$TELECOM_CERT_SHA256" | tr '[:lower:]' '[:upper:]')"
+        test -n "$actual_cert_sha256"
+        echo "APK signer certificate SHA-256: $actual_cert_sha256"
+        if [[ "$actual_cert_sha256" != "$expected_cert_sha256" ]]; then
+          echo "::error::APK signer does not match TELECOM_CERT_SHA256."
+          exit 1
+        fi
+
+        echo "apk=$apk" >> "$GITHUB_OUTPUT"
+
+    - name: Create release files
+      shell: bash
+      env:
+        APK: ${{ steps.verify_apk.outputs.apk }}
+      run: |
+        set -euo pipefail
+        mkdir -p release-files
+        cp "$APK" release-files/
+        (
+          cd release-files
+          sha256sum "$(basename "$APK")" > "$(basename "$APK").sha256"
+        )
+
+    - name: Publish GitHub Release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          echo "::error::Release $RELEASE_TAG already exists. Release tags are immutable."
+          exit 1
+        fi
+        notes_file="$RUNNER_TEMP/release-notes.md"
+        if [[ -n "$RELEASE_NOTES" ]]; then
+          printf '%s\n' "$RELEASE_NOTES" > "$notes_file"
+        else
+          printf '%s\n' 'Telecom release from the patched v2rayNG fork.' > "$notes_file"
+        fi
+        release_args=(
+          --repo "$GITHUB_REPOSITORY"
+          --title "Telecom $RELEASE_TAG"
+          --notes-file "$notes_file"
+        )
+        if [[ "$RELEASE_PRE_RELEASE" == "true" ]]; then
+          release_args+=(--prerelease)
+        else
+          release_args+=(--latest)
+        fi
+        gh release create "$RELEASE_TAG" release-files/* "${release_args[@]}"
+
+    - name: Upload release artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: telecom-release-${{ inputs.release_tag }}
+        path: release-files/*

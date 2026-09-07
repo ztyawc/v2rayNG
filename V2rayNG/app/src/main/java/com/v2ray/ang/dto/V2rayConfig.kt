@@ -81,6 +81,7 @@ data class V2rayConfig(
             var user: String? = null,
             var pass: String? = null,
             var headers: Map<String, String>? = null,
+            var cmccProtocol: String? = null,
             /*VMess/VLESS*/
             var id: String? = null,
             var security: String? = null,
@@ -108,7 +109,7 @@ data class V2rayConfig(
         }
 
         data class StreamSettingsBean(
-            var network: String = AppConfig.DEFAULT_NETWORK,
+            var network: String? = AppConfig.DEFAULT_NETWORK,
             var security: String? = null,
             var tcpSettings: TcpSettingsBean? = null,
             var kcpSettings: KcpSettingsBean? = null,
@@ -437,6 +438,7 @@ data class V2rayConfig(
         data class PingConfigObject(
             val destination: String,
             val connectivity: String? = null,
+            val httpMethod: String? = null,
             val interval: String,
             val sampling: Int,
             val timeout: String? = null

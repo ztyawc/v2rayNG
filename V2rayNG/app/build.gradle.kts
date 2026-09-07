@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
     id("com.jaredsburrows.license")
 }
 
@@ -12,9 +13,13 @@ android {
         applicationId = "com.v2ray.ang"
         minSdk = 24
         targetSdk = 37
-        versionCode = 736
-        versionName = "2.2.6"
+        // Keep this greater than both the prior telecom build and upstream 2.3.7.
+        // The telecom flavor's ABI-specific code is derived from this value.
+        versionCode = 748
+        versionName = "2.3.7.1"
         multiDexEnabled = true
+        buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/2dust/v2rayNG/releases\"")
+        buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s_%s.apk\"")
 
         val abiFilterList = (properties["ABI_FILTERS"] as? String)?.split(';')
         splits {
@@ -54,10 +59,22 @@ android {
             dimension = "distribution"
             applicationIdSuffix = ".fdroid"
             buildConfigField("String", "DISTRIBUTION", "\"F-Droid\"")
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
+            buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s-fdroid_%s.apk\"")
         }
         create("playstore") {
             dimension = "distribution"
             buildConfigField("String", "DISTRIBUTION", "\"Play Store\"")
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
+        }
+        create("telecom") {
+            dimension = "distribution"
+            applicationIdSuffix = ".telecom"
+            buildConfigField("String", "DISTRIBUTION", "\"Telecom\"")
+            // Releases are signed by this fork and must never be replaced by upstream APKs.
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "true")
+            buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/ztyawc/v2rayNG/releases\"")
+            buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_telecom_%s_%s.apk\"")
         }
     }
 
@@ -82,6 +99,7 @@ android {
     applicationVariants.all {
         val variant = this
         val isFdroid = variant.productFlavors.any { it.name == "fdroid" }
+        val isTelecom = variant.productFlavors.any { it.name == "telecom" }
         if (isFdroid) {
             val versionCodes =
                 mapOf(
@@ -112,7 +130,8 @@ android {
                     else
                         "universal"
 
-                    output.outputFileName = "v2rayNG_${variant.versionName}_${abi}.apk"
+                    val flavorPrefix = if (isTelecom) "telecom_" else ""
+                    output.outputFileName = "v2rayNG_${flavorPrefix}${variant.versionName}_${abi}.apk"
                     if (versionCodes.containsKey(abi)) {
                         output.versionCodeOverride =
                             (1000000 * versionCodes[abi]!!).plus(variant.versionCode)
@@ -124,8 +143,23 @@ android {
     }
 
     buildFeatures {
-        viewBinding = true
         buildConfig = true
+        compose = true
+    }
+
+    androidResources {
+        generateLocaleConfig = true
+        localeFilters += listOf(
+            "en",
+            "zh-rCN",
+            "zh-rTW",
+            "vi",
+            "ru",
+            "fa",
+            "ar",
+            "bn",
+            "bqi-rIR"
+        )
     }
 
     packaging {
@@ -143,19 +177,20 @@ dependencies {
     // AndroidX Core Libraries
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
-    implementation(libs.androidx.activity)
-    implementation(libs.androidx.constraintlayout)
-    implementation(libs.preference.ktx)
-    implementation(libs.recyclerview)
-    implementation(libs.androidx.swiperefreshlayout)
-    implementation(libs.androidx.viewpager2)
-    implementation(libs.androidx.fragment)
 
-    // UI Libraries
-    implementation(libs.material)
-    implementation(libs.toasty)
-    implementation(libs.editorkit)
-    implementation(libs.flexbox)
+    // Compose Libraries
+    implementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.coil.compose)
+
+    debugImplementation(libs.androidx.compose.ui.tooling)
 
     // Data and Storage Libraries
     implementation(libs.mmkv.static)
@@ -166,25 +201,23 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.core)
 
-    // Language and Processing Libraries
-    implementation(libs.language.base)
-    implementation(libs.language.json)
-
-    // Intent and Utility Libraries
-    implementation(libs.quickie.foss)
-    implementation(libs.core)
+    // QR Code: CameraX + ZXing
+    implementation(libs.camerax.core)
+    implementation(libs.camerax.camera2)
+    implementation(libs.camerax.lifecycle)
+    implementation(libs.camerax.compose)
+    implementation(libs.core) // zxing core
 
     // AndroidX Lifecycle and Architecture Components
     implementation(libs.lifecycle.viewmodel.ktx)
-    implementation(libs.lifecycle.livedata.ktx)
     implementation(libs.lifecycle.runtime.ktx)
 
     // Background Task Libraries
     implementation(libs.work.runtime.ktx)
     implementation(libs.work.multiprocess)
 
-    // Multidex Support
-    implementation(libs.multidex)
+    // Reorderable list
+    implementation(libs.reorderable)
 
     // Testing Libraries
     testImplementation(libs.junit)
