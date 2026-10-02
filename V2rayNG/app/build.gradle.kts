@@ -18,8 +18,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Keep this greater than both the prior telecom build and upstream 2.3.7.
         // The telecom flavor's ABI-specific code is derived from this value.
-        versionCode = 748
-        versionName = "2.3.7.1"
+        versionCode = 749
+        versionName = "2.3.7.2"
         multiDexEnabled = true
         buildConfigField("String", "UPDATE_API_URL", "\"https://api.github.com/repos/2dust/v2rayNG/releases\"")
         buildConfigField("String", "UPDATE_APK_TEMPLATE", "\"v2rayNG_%s_%s.apk\"")
