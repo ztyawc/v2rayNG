@@ -53,7 +53,7 @@ object RootProxyManager {
         val script = buildTun2socksSetup(context) ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
         if (!result.success) {
-            LogUtil.e(AppConfig.TAG, "RootProxyManager: setup failed, rolling back:\n${result.output}")
+            LogUtil.w(AppConfig.TAG, "Root mode phase=setup failed exit=${result.code}", java.io.IOException("Root setup failed"))
             teardown(context)
             return false
         }
@@ -72,7 +72,7 @@ object RootProxyManager {
             ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
         if (!result.success) {
-            LogUtil.e(AppConfig.TAG, "RootProxyManager: client sharing setup failed:\n${result.output}")
+            LogUtil.w(AppConfig.TAG, "VPN LAN mode phase=setup failed exit=${result.code}", java.io.IOException("LAN setup failed"))
             teardown(context)
             return false
         }
@@ -87,7 +87,8 @@ object RootProxyManager {
     }
 
     private fun teardown(context: Context) {
-        RootShell.runScript(context, "teardown_rules.sh", buildTeardown(context))
+        val result = RootShell.runScript(context, "teardown_rules.sh", buildTeardown(context), timeoutMillis = 1500)
+        check(result.success) { "Root routing cleanup failed" }
     }
 
     // --------------------------------------------------------------- TUN2SOCKS
@@ -495,6 +496,25 @@ object RootProxyManager {
             appendLine("[ -f '$oomGuardPid' ] && kill \$(cat '$oomGuardPid') 2>/dev/null || true")
             appendLine("rm -f '$oomGuardPid'")
             appendLine("echo 0 > /proc/$corePid/oom_score_adj 2>/dev/null || true")
+            // Deleting an absent rule is harmless; a remaining rule must keep the core
+            // listener alive until cleanup succeeds, rather than report a false stop.
+            for ((table, chain) in listOf("mangle" to CHAIN, "filter" to AppConfig.ROOT_FWD_CHAIN, "nat" to AppConfig.ROOT_DNS_CHAIN)) {
+                appendLine("rules=\$(iptables -t $table -S 2>/dev/null) || exit 1")
+                appendLine("printf '%s\\n' \"\$rules\" | grep -q '$chain' && exit 1")
+            }
+            for ((table, chain) in listOf("mangle" to CHAIN, "filter" to AppConfig.ROOT_V6_CHAIN,
+                "filter" to AppConfig.ROOT_V6_FWD_CHAIN, "mangle" to AppConfig.ROOT_V6_PRE_CHAIN)) {
+                // Android kernels without IPv6 netfilter cannot create these chains. Remove
+                // this fallback when IPv6 netfilter is required on every supported root device.
+                appendLine("if rules=\$(ip6tables -t $table -S 2>/dev/null); then")
+                appendLine("  printf '%s\\n' \"\$rules\" | grep -q '$chain' && exit 1")
+                appendLine("fi")
+            }
+            for (family in listOf("", "-6 ")) {
+                appendLine("rules=\$(ip ${family}rule show 2>/dev/null) || exit 1")
+                appendLine("printf '%s\\n' \"\$rules\" | grep -Eq '^$PRIORITY:.*lookup[[:space:]]+$TABLE([[:space:]]|$)' && exit 1")
+            }
+            appendLine("exit 0")
         }
     }
 }

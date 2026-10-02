@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">no details available</string>
     <string name="value_unknown">unknown</string>
 
+    <string name="server_qyproxy">CN2 / CN2 download</string>
+    <string name="menu_item_import_config_manually_qyproxy">Manual [CN2 / CN2 download]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">CN2 download</string>
+    <string name="qyproxy_sn">Device SN</string>
+    <string name="qyproxy_game_id">Game ID</string>
+    <string name="qyproxy_server_id">Server ID</string>
+    <string name="qyproxy_game_area">Game area</string>
+    <string name="qyproxy_zone">Zone</string>
+    <string name="qyproxy_client_type">Client type</string>
+    <string name="qyproxy_product">Client product</string>
+    <string name="qyproxy_version">Client version</string>
+    <string name="qyproxy_credentials_hint">Use the raw node username and the CN2-specific secret. Fill in the actual control port, device SN, game and server IDs.</string>
+    <string name="qyproxy_invalid_config">Check the required fields, IPv4 node address or hostname, port (1–65535), and IDs (1–4294967295).</string>
 </resources>

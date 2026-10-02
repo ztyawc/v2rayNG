@@ -61,7 +61,7 @@ class MainRepository(
                     .serializable<ConnectionTestResult>("content")
                     ?.let { MainServiceEvent.MeasureDelayResult(it) }
 
-                AppConfig.MSG_MEASURE_CONFIG_SUCCESS -> MainServiceEvent.MeasureConfigSuccess
+                AppConfig.MSG_MEASURE_CONFIG_SUCCESS -> MainServiceEvent.MeasureConfigSuccess(safeIntent.getStringExtra("content").orEmpty())
                 AppConfig.MSG_MEASURE_CONFIG_NOTIFY -> MainServiceEvent.MeasureConfigNotify(
                     safeIntent.getStringExtra("content").orEmpty()
                 )
@@ -155,8 +155,8 @@ class MainRepository(
     override fun decodeAffiliationInfo(guid: String): ServerAffiliationInfo? =
         MmkvManager.decodeServerAffiliationInfo(guid)
 
-    override fun encodeServerList(guids: List<String>, groupId: String) =
-        MmkvManager.encodeServerList(ArrayList(guids), groupId)
+    override fun moveServer(groupId: String, fromGuid: String, toGuid: String): List<String> =
+        MmkvManager.moveServer(groupId, fromGuid, toGuid)
 
     override fun removeServer(guid: String) = MmkvManager.removeServer(guid)
 

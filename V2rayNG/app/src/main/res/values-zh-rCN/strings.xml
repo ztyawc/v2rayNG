@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">无详细信息</string>
     <string name="value_unknown">未知</string>
 
+    <string name="server_qyproxy">CN2 / CN2 下载</string>
+    <string name="menu_item_import_config_manually_qyproxy">手动输入 [CN2 / CN2 下载]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">CN2 下载</string>
+    <string name="qyproxy_sn">设备 SN</string>
+    <string name="qyproxy_game_id">游戏 ID</string>
+    <string name="qyproxy_server_id">区服 ID</string>
+    <string name="qyproxy_game_area">游戏区域</string>
+    <string name="qyproxy_zone">选择区域</string>
+    <string name="qyproxy_client_type">客户端类型</string>
+    <string name="qyproxy_product">客户端产品</string>
+    <string name="qyproxy_version">客户端版本</string>
+    <string name="qyproxy_credentials_hint">填写原始节点用户名和 CN2 专用 secret，以及实际控制端口、设备 SN、游戏和区服 ID。</string>
+    <string name="qyproxy_invalid_config">请检查必填项、IPv4 节点地址或域名、端口（1–65535）及 ID（1–4294967295）。</string>
 </resources>

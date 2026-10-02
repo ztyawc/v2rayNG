@@ -100,6 +100,10 @@
             android:exported="false"
             android:windowSoftInputMode="stateUnchanged|adjustResize" />
         <activity
+            android:name=".ui.server.ServerQyProxyActivity"
+            android:exported="false"
+            android:windowSoftInputMode="stateUnchanged|adjustResize" />
+        <activity
             android:name=".ui.server.ServerHttpActivity"
             android:exported="false"
             android:windowSoftInputMode="stateUnchanged|adjustResize" />

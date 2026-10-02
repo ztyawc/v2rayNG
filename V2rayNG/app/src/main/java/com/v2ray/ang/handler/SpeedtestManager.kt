@@ -35,11 +35,11 @@ object SpeedtestManager {
 
             return System.currentTimeMillis() - start
         } catch (e: UnknownHostException) {
-            LogUtil.e(AppConfig.TAG, "Unknown host: $url", e)
+            LogUtil.e(AppConfig.TAG, "Speed test host resolution failed", e)
         } catch (e: IOException) {
-            LogUtil.e(AppConfig.TAG, "socketConnectTime IOException: ${e.message}")
+            LogUtil.e(AppConfig.TAG, "Speed test socket connection failed", e)
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to establish socket connection to $url:$port", e)
+            LogUtil.e(AppConfig.TAG, "Speed test socket connection failed", e)
         } finally {
             socket?.let { s ->
                 try {

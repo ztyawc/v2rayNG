@@ -19,8 +19,6 @@ import com.v2ray.ang.extension.delay
 import com.v2ray.ang.extension.toSpeedString
 import com.v2ray.ang.ui.main.MainActivity
 import com.v2ray.ang.util.LogUtil
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -44,12 +42,10 @@ object NotificationManager {
      * @param currentConfig The current profile configuration.
      */
     fun startSpeedNotification() {
-        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_SPEED_ENABLED) != true) return
-        if (speedNotificationJob != null || CoreServiceManager.isRunning() == false) return
-
-        var lastZeroSpeed = false
-
-        speedNotificationJob = CoroutineScope(Dispatchers.IO).launch {
+        if (speedNotificationJob?.isActive == true) return
+        speedNotificationJob = CoreServiceManager.workScope?.launch {
+            if (!MmkvManager.decodeSettingsBool(AppConfig.PREF_SPEED_ENABLED) || !CoreServiceManager.isRunning()) return@launch
+            var lastZeroSpeed = false
             while (isActive) {
                 lastZeroSpeed = updateSpeedNotificationOnce(lastZeroSpeed)
                 delay(QUERY_INTERVAL_MS)

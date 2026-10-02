@@ -82,6 +82,16 @@ data class V2rayConfig(
             var pass: String? = null,
             var headers: Map<String, String>? = null,
             var cmccProtocol: String? = null,
+            /*QyProxy CN2*/
+            var role: String? = null,
+            var sn: String? = null,
+            var gameId: Long? = null,
+            var serverId: Long? = null,
+            var clientType: Long? = null,
+            var gameArea: String? = null,
+            var zone: String? = null,
+            var product: String? = null,
+            var clientVersion: String? = null,
             /*VMess/VLESS*/
             var id: String? = null,
             var security: String? = null,

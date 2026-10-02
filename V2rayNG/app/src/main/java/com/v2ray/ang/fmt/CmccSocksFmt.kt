@@ -30,14 +30,20 @@ object CmccSocksFmt : FmtBase() {
             if (!uri.scheme.equals("cmcc", ignoreCase = true)) return null
             if (uri.idnHost.isEmpty() || uri.port !in 1..65535) return null
 
-            val credentials = uri.userInfo?.split(":", limit = 2) ?: return null
+            val rawCredentials = uri.rawUserInfo ?: return null
+            // Releases before separate component encoding encoded the separator as %3A.
+            val credentials = if (':' in rawCredentials) {
+                rawCredentials.split(":", limit = 2).map(Utils::decodeURIComponent)
+            } else {
+                Utils.decodeURIComponent(rawCredentials).split(":", limit = 2)
+            }
             if (credentials.size != 2 || credentials[0].isBlank() || credentials[1].isBlank()) {
                 return null
             }
 
             val cmccProtocol = parseAuth(uri) ?: return null
             ProfileItem.create(EConfigType.PRIVATE_SOCKS).apply {
-                remarks = Utils.decodeURIComponent(uri.fragment.orEmpty()).ifEmpty { "none" }
+                remarks = Utils.decodeURIComponent(uri.rawFragment.orEmpty()).ifEmpty { "none" }
                 server = uri.idnHost
                 serverPort = uri.port.toString()
                 username = credentials[0]
@@ -51,11 +57,10 @@ object CmccSocksFmt : FmtBase() {
 
     /** Converts a private SOCKS profile to the URI body; callers prepend `cmcc://`. */
     fun toUri(config: ProfileItem): String {
-        val query = hashMapOf(
-            "auth" to (normalizeCmccProtocol(config.cmccProtocol) ?: AUTH_80)
-        )
-        val userInfo = "${config.username.orEmpty()}:${config.password.orEmpty()}"
-        return toUri(config, userInfo, query)
+        val auth = requireNotNull(normalizeCmccProtocol(config.cmccProtocol)) { "Unsupported private SOCKS authentication mode" }
+        require(!config.username.isNullOrBlank() && !config.password.isNullOrBlank()) { "Private SOCKS credentials are required" }
+        val userInfo = "${Utils.encodeURIComponent(config.username.orEmpty())}:${Utils.encodeURIComponent(config.password.orEmpty())}"
+        return toUriWithEncodedUserInfo(config, userInfo, hashMapOf("auth" to auth))
     }
 
     private fun parseAuth(uri: URI): String? {

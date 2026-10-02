@@ -10,14 +10,9 @@ import com.v2ray.ang.core.CoreServiceManager
 import com.v2ray.ang.handler.AppLocaleManager
 import com.v2ray.ang.handler.NotificationManager
 import com.v2ray.ang.root.RootProxyManager
+import com.v2ray.ang.root.RootManager
 import com.v2ray.ang.util.LogUtil
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import java.lang.ref.SoftReference
+import kotlinx.coroutines.runInterruptible
 
 /**
  * Foreground service for the root (system-wide) run modes. Unlike [CoreVpnService] it
@@ -30,63 +25,46 @@ import java.lang.ref.SoftReference
  */
 class CoreRootService : Service(), ServiceControl {
 
-    private var setupJob: Job? = null
+    private lateinit var session: CoreServiceManager.Session
+    private var rootSetupAttempted = false
 
     override fun onCreate() {
         super.onCreate()
-        LogUtil.i(AppConfig.TAG, "StartCore-Root: Service created")
-        CoreServiceManager.serviceControl = SoftReference(this)
+        session = CoreServiceManager.createSession(
+            control = this,
+            setup = { runInterruptible { check(RootManager.isRootAvailable()) { "Root access unavailable" } }; null },
+            afterStart = {
+                rootSetupAttempted = true
+                runInterruptible { check(RootProxyManager.start(this)) { "Root setup failed" } }
+            },
+            release = {
+                if (rootSetupAttempted) {
+                    runInterruptible { RootProxyManager.stop(this) }
+                    rootSetupAttempted = false
+                }
+            },
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         NotificationManager.ensureForeground()
-        LogUtil.i(AppConfig.TAG, "StartCore-Root: command received")
-
-        if (CoreServiceManager.isRunning()) {
-            LogUtil.i(AppConfig.TAG, "StartCore-Root: Core is already running")
-            return START_STICKY
-        }
-
-        // Start the in-process core first (this also posts the foreground notification),
-        // then install the root routing off the main thread.
-        if (!CoreServiceManager.startCoreLoop(null)) {
-            LogUtil.e(AppConfig.TAG, "StartCore-Root: core failed to start")
-            stopService()
-            return START_NOT_STICKY
-        }
-
-        setupJob = CoroutineScope(Dispatchers.IO).launch {
-            if (!RootProxyManager.start(this@CoreRootService)) {
-                LogUtil.e(AppConfig.TAG, "StartCore-Root: failed to start root mode, stopping")
-                stopService()
-            }
-        }
-
-        return START_STICKY
+        session.start(intent)
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        session.destroy()
         super.onDestroy()
-        // Wait for any in-flight async setup to finish before tearing down. The rules are
-        // installed off the main thread and can take seconds (the setup script waits for the
-        // tun to appear); if a stop arrives during that window, teardown would run first and
-        // the setup would then re-install the rules + tun pointing at a now-dead core,
-        // blackholing all traffic until the next start/stop cycle clears it.
-        runBlocking { setupJob?.cancelAndJoin() }
-        // Remove routing rules BEFORE stopping the core so traffic is never redirected
-        // to a dead listener. Synchronous on purpose — leaving rules behind breaks the net.
-        RootProxyManager.stop(this)
-        CoreServiceManager.stopCoreLoop()
     }
 
     override fun getService(): Service = this
 
     override fun startService() {
-        // do nothing
+        session.start()
     }
 
     override fun stopService() {
-        stopSelf()
+        session.requestStop()
     }
 
     override fun vpnProtect(socket: Int): Boolean = true

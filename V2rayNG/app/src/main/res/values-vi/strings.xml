@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">không có thông tin chi tiết</string>
     <string name="value_unknown">không xác định</string>
 
+    <string name="server_qyproxy">CN2 / CN2 tải xuống</string>
+    <string name="menu_item_import_config_manually_qyproxy">Nhập thủ công [CN2 / CN2 tải xuống]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">CN2 tải xuống</string>
+    <string name="qyproxy_sn">SN thiết bị</string>
+    <string name="qyproxy_game_id">ID trò chơi</string>
+    <string name="qyproxy_server_id">ID máy chủ</string>
+    <string name="qyproxy_game_area">Khu vực trò chơi</string>
+    <string name="qyproxy_zone">Vùng</string>
+    <string name="qyproxy_client_type">Loại máy khách</string>
+    <string name="qyproxy_product">Sản phẩm máy khách</string>
+    <string name="qyproxy_version">Phiên bản máy khách</string>
+    <string name="qyproxy_credentials_hint">Nhập tên người dùng gốc và secret riêng của CN2, cổng điều khiển thực tế, SN thiết bị, ID trò chơi và máy chủ.</string>
+    <string name="qyproxy_invalid_config">Kiểm tra các trường bắt buộc, IPv4 hoặc tên miền nút, cổng (1–65535) và ID (1–4294967295).</string>
 </resources>

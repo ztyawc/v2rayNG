@@ -64,7 +64,7 @@ object HttpHeaderParser {
                     ParseError(index + 1, ErrorType.INVALID_NAME)
                 )
             }
-            if (rawValue.contains('\r') || rawValue.contains('\n')) {
+            if (!rawValue.isHttpValue()) {
                 return ParseResult(
                     headers,
                     ParseError(index + 1, ErrorType.INVALID_VALUE)
@@ -90,6 +90,16 @@ object HttpHeaderParser {
     fun format(headers: Map<String, String>?): String {
         return headers.orEmpty().entries.joinToString("\n") { (name, value) -> "$name: $value" }
     }
+
+    /** Validate decoded backups as well as editor input, without normalizing credential values. */
+    fun isValid(headers: Map<String, String>?): Boolean {
+        val names = hashSetOf<String>()
+        return headers.orEmpty().all { (name, value) ->
+            name.isHttpToken() && names.add(name.lowercase(Locale.ROOT)) && value.isHttpValue()
+        }
+    }
+
+    private fun String.isHttpValue(): Boolean = all { it == '\t' || (it.code >= 32 && it.code != 127) }
 
     private fun String.isHttpToken(): Boolean {
         return isNotEmpty() && all { char ->

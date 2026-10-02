@@ -28,48 +28,283 @@ import com.v2ray.ang.helper.MessageHelper
 import com.v2ray.ang.service.DialerNativeService
 import com.v2ray.ang.service.DialerWebviewService
 import com.v2ray.ang.service.NetworkMonitor
+import com.v2ray.ang.service.ServiceLifecycle
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
+import java.io.IOException
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.ProcessFinder
 import java.lang.ref.SoftReference
+import java.lang.ref.WeakReference
 import java.net.InetSocketAddress
+import java.util.concurrent.TimeoutException
 
 object CoreServiceManager {
 
-    private val coreController: CoreController = CoreNativeManager.newCoreController(CoreCallback())
+    private lateinit var coreController: CoreController
+    private val nativeMutex = Mutex()
+    private val nativeAccess = Any()
+    private val commandGeneration = AtomicLong()
+    private var receiverService: WeakReference<Service>? = null
+    @Volatile private var activeSession: Session? = null
+    val workScope: CoroutineScope? get() = activeSession?.workScope
     private val mMsgReceive = ReceiveMessageHandler()
     private var currentConfig: ProfileItem? = null
     private var processFinder: XrayProcessFinder? = null
     private var browserDialer: IDialerService? = null
     private var networkMonitor: NetworkMonitor? = null
 
-    @Volatile
-    private var isReloading = false
-
-    /** Tun descriptor the core was started with, null in the proxy only and root run modes. */
+    /** Tun descriptor owned by the active service, null in proxy-only and root modes. */
     private var currentVpnInterface: ParcelFileDescriptor? = null
 
     var serviceControl: SoftReference<ServiceControl>? = null
-        set(value) {
-            field = value
-            val service = value?.get()?.getService()
-            CoreNativeManager.initCoreEnv(service)
-            if (service != null && processFinder == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                processFinder = XrayProcessFinder(service)
-                coreController.registerProcessFinder(processFinder)
+        private set
+
+    fun createSession(
+        control: ServiceControl,
+        setup: suspend () -> ParcelFileDescriptor?,
+        afterStart: suspend () -> Unit = {},
+        release: suspend () -> Unit = {},
+        afterStop: suspend () -> Unit = {},
+    ): Session {
+        val predecessor = activeSession?.requestStop()
+        serviceControl = SoftReference(control)
+        return Session(control, setup, afterStart, release, afterStop, predecessor).also { activeSession = it }
+    }
+
+    /** One service instance owns commands, setup, handovers and notification workers. */
+    class Session internal constructor(
+        private val control: ServiceControl,
+        private val setup: suspend () -> ParcelFileDescriptor?,
+        private val afterStart: suspend () -> Unit,
+        private val release: suspend () -> Unit,
+        private val afterStop: suspend () -> Unit,
+        private val predecessor: Job?,
+    ) {
+        private val lifecycle = ServiceLifecycle()
+        private val owner = SupervisorJob()
+        private val scope = CoroutineScope(owner + Dispatchers.IO)
+        private var workers = SupervisorJob(owner)
+        var workScope = CoroutineScope(workers + Dispatchers.IO)
+            private set
+        private var commandJob: Job? = null
+        private var stopJob: Job? = null
+        private var ownsResources = false
+        private var profileGuid: String? = null
+        private val service get() = control.getService()
+
+        fun start(intent: Intent? = null) {
+            if (intent?.hasExtra(LauncherManager.RESTART_GENERATION) == true &&
+                intent.getLongExtra(LauncherManager.RESTART_GENERATION, -1) != commandGeneration.get()) {
+                requestStop()
+                return
+            }
+            val token = lifecycle.start() ?: return
+            try {
+                registerCommands(service)
+                commandJob = scope.launch { startAttempt(token) }
+            } catch (failure: Exception) {
+                LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=register guid=$profileGuid failed", failure)
+                MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
+                requestStop()
             }
         }
+
+        private suspend fun startAttempt(token: Long) {
+            try {
+                predecessor?.join()
+                nativeMutex.withLock {
+                    currentCoroutineContext().ensureActive()
+                    check(lifecycle.accepts(token))
+                    profileGuid = MmkvManager.getSelectServer()
+                    ownsResources = true // setup may fail after acquiring only some resources.
+                    runInterruptible { check(SettingsManager.initAssets(service, service.assets)) { "Native assets unavailable" } }
+                    CoreNativeManager.initCoreEnv(service)
+                    if (!::coreController.isInitialized) coreController = CoreNativeManager.newCoreController(CoreCallback())
+                    if (processFinder == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        processFinder = XrayProcessFinder(service.applicationContext)
+                        coreController.registerProcessFinder(processFinder)
+                    }
+                    SettingsManager.refreshRuntimeSocksPort()
+                    val descriptor = setup()
+                    currentCoroutineContext().ensureActive()
+                    if (!startCoreLoop(service, descriptor)) error("Core setup failed")
+                    afterStart()
+                    currentCoroutineContext().ensureActive()
+                    if (!lifecycle.running(token)) throw CancellationException("Service stopped during setup")
+                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_SUCCESS, "")
+                    startNetworkMonitor(service)
+                    NotificationManager.startSpeedNotification()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                currentCoroutineContext().ensureActive()
+                LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=setup guid=$profileGuid failed", failure)
+                MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
+                requestStop()
+            }
+        }
+
+        fun restart() {
+            val token = lifecycle.restart() ?: return
+            networkMonitor?.unregister()
+            networkMonitor = null
+            commandJob?.cancel()
+            workers.cancel()
+            commandJob = scope.launch {
+                try {
+                    workers.join()
+                    nativeMutex.withLock { cleanup(keepForeground = true) }
+                    ensureActive()
+                    if (!lifecycle.accepts(token)) return@launch
+                    workers = SupervisorJob(owner)
+                    workScope = CoroutineScope(workers + Dispatchers.IO)
+                    val requestedMode = when {
+                        SettingsManager.isRootMode() -> "CoreRootService"
+                        SettingsManager.isVpnMode() -> "CoreVpnService"
+                        else -> "CoreProxyOnlyService"
+                    }
+                    if (requestedMode != service.javaClass.simpleName) {
+                        val stamp = commandGeneration.get()
+                        ensureActive()
+                        if (!lifecycle.accepts(token)) return@launch
+                        // Retire this session before Android can create the next mode's service;
+                        // createSession must not invalidate the new launch's generation.
+                        lifecycle.stopped()
+                        unregisterCommands(service)
+                        try {
+                            LauncherManager.restartFromDaemon(service, stamp)
+                        } finally {
+                            withContext(NonCancellable + Dispatchers.Main) { service.stopSelf() }
+                            owner.cancel()
+                        }
+                    } else {
+                        startAttempt(token)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=restart guid=$profileGuid failed", failure)
+                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
+                    requestStop()
+                }
+            }
+        }
+
+        @Synchronized
+        fun requestStop(): Job? {
+            if (!lifecycle.stop()) return stopJob
+            if (stopJob?.isActive == true) return stopJob
+            commandGeneration.incrementAndGet()
+            // Invalidate commands before cancellation can resume blocked native/root work.
+            networkMonitor?.unregister()
+            networkMonitor = null
+            commandJob?.cancel()
+            workers.cancel()
+            stopJob = scope.launch {
+                commandJob?.join()
+                workers.join()
+                try {
+                    withContext(NonCancellable) { nativeMutex.withLock { cleanup(keepForeground = false) } }
+                    lifecycle.stopped()
+                    unregisterCommands(service)
+                    withContext(Dispatchers.Main) { service.stopSelf() }
+                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_STOP_SUCCESS, "")
+                    owner.cancel()
+                } catch (failure: Exception) {
+                    LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=cleanup guid=$profileGuid failed", failure)
+                }
+            }
+            return stopJob
+        }
+
+        private suspend fun cleanup(keepForeground: Boolean) {
+            if (ownsResources) {
+                // VPN/LAN/root resources are removed before the listener they depend on.
+                release()
+                stopCoreLoop(service)
+                afterStop()
+                SettingsManager.clearRuntimeSocksPort()
+                ownsResources = false
+            }
+            if (!keepForeground && activeSession === this) NotificationManager.cancelNotification()
+        }
+
+        fun destroy() {
+            val stopping = requestStop()
+            // Leak prevention: finish routing/tunnel removal before Android destroys the service.
+            // Root commands and this callback both have explicit bounds; never wait indefinitely.
+            val completed = runBlocking { withTimeoutOrNull(3500) { stopping?.join(); true } } == true
+            if (!completed) {
+                LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=destroy guid=$profileGuid cleanup timed out",
+                    TimeoutException("Service cleanup exceeded 3500ms"))
+            }
+            unregisterCommands(service)
+            owner.cancel()
+            if (activeSession === this) {
+                activeSession = null
+                serviceControl = null
+            }
+        }
+
+        fun canReload(token: Long): Boolean = lifecycle.phase == ServiceLifecycle.Phase.RUNNING && lifecycle.accepts(token)
+        fun generation(): Long = lifecycle.current()
+
+        fun reportState() {
+            scope.launch {
+                val running = canReload(generation()) && isRunning()
+                MessageHelper.sendMsg2UI(service,
+                    if (running) AppConfig.MSG_STATE_RUNNING else AppConfig.MSG_STATE_NOT_RUNNING, "")
+            }
+        }
+    }
+
+    private fun registerCommands(service: Service) {
+        if (receiverService?.get() === service) return
+        receiverService?.get()?.let(::unregisterCommands)
+        val filter = IntentFilter(AppConfig.BROADCAST_ACTION_SERVICE).apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        ContextCompat.registerReceiver(service, mMsgReceive, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        receiverService = WeakReference(service)
+    }
+
+    private fun unregisterCommands(service: Service) {
+        if (receiverService?.get() !== service) return
+        try {
+            service.unregisterReceiver(mMsgReceive)
+        } catch (error: Exception) {
+            LogUtil.w(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=cleanup unregister receiver failed", error)
+        }
+        receiverService = null
+    }
 
     /**
      * Checks if the V2Ray service is running.
      * @return True if the service is running, false otherwise.
      */
-    fun isRunning() = coreController.isRunning
+    fun isRunning() = ::coreController.isInitialized && coreController.isRunning
 
     /**
      * Gets the name of the currently running server.
@@ -82,51 +317,19 @@ object CoreServiceManager {
      * `registerReceiver(Context, BroadcastReceiver, IntentFilter, int)`.
      * Starts the V2Ray core service.
      */
-    fun startCoreLoop(vpnInterface: ParcelFileDescriptor?): Boolean {
-        if (isRunning()) {
-            LogUtil.w(AppConfig.TAG, "StartCore-Manager: Core already running")
-            return false
-        }
-
-        val service = getService()
-        if (service == null) {
-            LogUtil.e(AppConfig.TAG, "StartCore-Manager: Service is null")
-            return false
-        }
-
-        try {
-            doStartCoreLoop(service, vpnInterface)
-            return true
-        } catch (e: Exception) {
-            val message = e.message?.takeUnless { it.isBlank() } ?: e.javaClass.simpleName
-            LogUtil.e(AppConfig.TAG, "StartCore-Manager: $message", e)
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, message)
-            NotificationManager.cancelNotification()
-            return false
-        }
-    }
-
-    @Throws(Exception::class)
-    private fun doStartCoreLoop(service: Service, vpnInterface: ParcelFileDescriptor?) {
-        val mFilter = IntentFilter(AppConfig.BROADCAST_ACTION_SERVICE)
-        mFilter.addAction(Intent.ACTION_SCREEN_ON)
-        mFilter.addAction(Intent.ACTION_SCREEN_OFF)
-        mFilter.addAction(Intent.ACTION_USER_PRESENT)
-        ContextCompat.registerReceiver(service, mMsgReceive, mFilter, Utils.receiverFlags())
-
+    private suspend fun startCoreLoop(service: Service, vpnInterface: ParcelFileDescriptor?): Boolean {
         currentVpnInterface = vpnInterface
         launchCore(service, vpnInterface)
-        startNetworkMonitor(service)
+        return isRunning()
     }
 
     @Throws(Exception::class)
-    private fun launchCore(service: Service, vpnInterface: ParcelFileDescriptor?, isReload: Boolean = false) {
+    private suspend fun launchCore(service: Service, vpnInterface: ParcelFileDescriptor?, isReload: Boolean = false) {
         val guid = MmkvManager.getSelectServer() ?: error("No server selected")
         val config = MmkvManager.decodeServerConfig(guid) ?: error("Failed to decode server config")
 
-        LogUtil.i(AppConfig.TAG, "StartCore-Manager: Starting core loop for ${config.remarks}")
+        LogUtil.i(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=start guid=$guid")
         val result = CoreConfigManager.getV2rayConfig(service, guid)
-        LogUtil.d(AppConfig.TAG, result.content)
         if (!result.status) {
             error(result.errorMessage.ifBlank { "Failed to get V2Ray config" })
         }
@@ -147,76 +350,41 @@ object CoreServiceManager {
         if (dialerAddr.isNotNullEmpty()) {
             CoreNativeManager.reconcileBrowserDialer(dialerAddr)
         }
-        coreController.startLoop(result.content, tunFd)
+        synchronized(nativeAccess) { coreController.startLoop(result.content, tunFd) }
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
 
         if (!isRunning()) {
             error("Core failed to start")
         }
 
         if (browserDialer != null) {
-            browserDialer!!.stop()
+            withContext(Dispatchers.Main) { browserDialer?.stop() }
             browserDialer = null
         }
         when (dialerMode) {
             BrowserDialerMode.OKHTTP -> {
                 browserDialer = DialerNativeService()
-                browserDialer!!.start(service, dialerAddr)
+                withContext(Dispatchers.Main) { browserDialer?.start(service, dialerAddr) }
             }
 
             BrowserDialerMode.WEBVIEW -> {
                 browserDialer = DialerWebviewService()
-                browserDialer!!.start(service, dialerAddr)
+                withContext(Dispatchers.Main) { browserDialer?.start(service, dialerAddr) }
             }
 
             else -> {}
         }
 
-        if (!isReload) {
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_SUCCESS, "")
-        }
-        NotificationManager.startSpeedNotification()
-        LogUtil.i(AppConfig.TAG, "StartCore-Manager: Core started successfully")
     }
 
-    /**
-     * Stops the V2Ray core service.
-     * Unregisters broadcast receivers, stops notifications, and shuts down plugins.
-     * @return True if the core was stopped successfully, false otherwise.
-     */
-    fun stopCoreLoop(): Boolean {
-        val service = getService() ?: return false
-
-        networkMonitor?.unregister()
-        networkMonitor = null
-        currentVpnInterface = null
-
-        if (isRunning()) {
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    coreController.stopLoop()
-                } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to stop V2Ray loop", e)
-                }
-            }
-        }
-
-        // Close existing browser dialer
+    private suspend fun stopCoreLoop(service: Service) {
+        NotificationManager.stopSpeedNotification()
+        if (isRunning()) synchronized(nativeAccess) { coreController.stopLoop() }
         CoreNativeManager.reconcileBrowserDialer("")
-        if (browserDialer != null) {
-            browserDialer!!.stop()
-            browserDialer = null
-        }
-
-        MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_STOP_SUCCESS, "")
-        NotificationManager.cancelNotification()
-
-        try {
-            service.unregisterReceiver(mMsgReceive)
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to unregister receiver", e)
-        }
-
-        return true
+        browserDialer?.let { dialer -> withContext(Dispatchers.Main) { dialer.stop() } }
+        browserDialer = null
+        currentConfig = null
+        currentVpnInterface = null
     }
 
     /**
@@ -232,7 +400,10 @@ object CoreServiceManager {
         networkMonitor = NetworkMonitor(
             connectivity = connectivity,
             onUnderlyingNetworksChanged = { networks -> serviceControl?.get()?.setUnderlyingNetworks(networks) },
-            onHandover = { reloadCore() },
+            scope = activeSession?.workScope ?: return,
+            onHandover = { monitor -> reloadCore(monitor) },
+            component = service.javaClass.simpleName,
+            profileGuid = MmkvManager.getSelectServer(),
         ).also { it.register() }
     }
 
@@ -245,29 +416,32 @@ object CoreServiceManager {
      *
      * @return True if the core is running again.
      */
-    private fun reloadCore(): Boolean {
-        if (isReloading) return false
-        val service = getService() ?: return false
-        if (!isRunning()) return false
-
-        return try {
-            val tunFd = currentVpnInterface
-
-            isReloading = true
-            LogUtil.i(AppConfig.TAG, "StartCore-Manager: Core reload start...")
-
-            coreController.stopLoop()
-            launchCore(service, tunFd, isReload = true)
-
-            LogUtil.i(AppConfig.TAG, "StartCore-Manager: Core reload finished")
-            true
-        } catch (e: Exception) {
-            val message = e.message?.takeUnless { it.isBlank() } ?: e.javaClass.simpleName
-            LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to reload core: $message", e)
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, message)
-            false
-        } finally {
-            isReloading = false
+    private fun reloadCore(monitor: NetworkMonitor) {
+        val session = activeSession ?: return
+        val token = session.generation()
+        session.workScope.launch {
+            nativeMutex.withLock {
+                // A cancelled or replaced monitor cannot restart a stopped service.
+                if (networkMonitor !== monitor || !monitor.isRegistered() || activeSession !== session ||
+                    !session.canReload(token) || !isRunning()) return@withLock
+                val service = getService() ?: return@withLock
+                val descriptor = currentVpnInterface
+                try {
+                    NotificationManager.stopSpeedNotification()
+                    synchronized(nativeAccess) { coreController.stopLoop() }
+                    ensureActive()
+                    if (!session.canReload(token) || networkMonitor !== monitor) return@withLock
+                    launchCore(service, descriptor, isReload = true)
+                    ensureActive()
+                    NotificationManager.startSpeedNotification()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=reload guid=${MmkvManager.getSelectServer()} failed", IOException(failure.javaClass.simpleName))
+                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, "")
+                    session.requestStop()
+                }
+            }
         }
     }
 
@@ -279,7 +453,10 @@ object CoreServiceManager {
         // The stats manager is gone once the core stops, querying it then reaches into freed state.
         if (!isRunning()) return emptyList()
 
-        val payload = coreController.queryAllOutboundTrafficStats()
+        val payload = synchronized(nativeAccess) {
+            if (!isRunning()) return emptyList()
+            coreController.queryAllOutboundTrafficStats()
+        }
 
         val result = ArrayList<OutboundTrafficStat>()
 
@@ -313,23 +490,21 @@ object CoreServiceManager {
             return
         }
 
-        CoroutineScope(Dispatchers.IO).launch {
+        workScope?.launch {
             val service = getService() ?: return@launch
             var time = -1L
-            var errorStr = ""
+            val errorStr = ""
 
             try {
                 time = coreController.measureDelay(SettingsManager.getDelayTestUrl())
             } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to measure delay", e)
-                errorStr = e.message?.substringAfter("\":").orEmpty()
+                LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=measure guid=${MmkvManager.getSelectServer()} failed", IOException(e.javaClass.simpleName))
             }
             if (time == -1L) {
                 try {
                     time = coreController.measureDelay(SettingsManager.getDelayTestUrl(true))
                 } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to measure delay", e)
-                    errorStr = e.message?.substringAfter("\":").orEmpty()
+                    LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=measure-fallback guid=${MmkvManager.getSelectServer()} failed", IOException(e.javaClass.simpleName))
                 }
             }
 
@@ -382,7 +557,7 @@ object CoreServiceManager {
          * @return Always returns 0.
          */
         override fun onEmitStatus(l: Long, s: String?): Long {
-            LogUtil.i(AppConfig.TAG, "StartCore-Manager: CoreCallback onEmitStatus $s")
+            LogUtil.d(AppConfig.TAG, "Core status code=$l")
             return 0
         }
     }
@@ -439,11 +614,7 @@ object CoreServiceManager {
             val serviceControl = serviceControl?.get() ?: return
             when (intent?.getIntExtra("key", 0)) {
                 AppConfig.MSG_REGISTER_CLIENT -> {
-                    if (isRunning()) {
-                        MessageHelper.sendMsg2UI(serviceControl.getService(), AppConfig.MSG_STATE_RUNNING, "")
-                    } else {
-                        MessageHelper.sendMsg2UI(serviceControl.getService(), AppConfig.MSG_STATE_NOT_RUNNING, "")
-                    }
+                    activeSession?.reportState()
                 }
 
                 AppConfig.MSG_UNREGISTER_CLIENT -> {
@@ -465,16 +636,7 @@ object CoreServiceManager {
                     // daemon before stopping it instead of relying on possibly stale UI state.
                     if (isOrderedBroadcast) resultCode = Activity.RESULT_OK
 
-                    val pendingResult = goAsync()
-                    CoroutineScope(Dispatchers.Default).launch {
-                        try {
-                            serviceControl.stopService()
-                            delay(500L)
-                            LauncherManager.startService(serviceControl.getService())
-                        } finally {
-                            pendingResult.finish()
-                        }
-                    }
+                    activeSession?.restart()
                 }
 
                 AppConfig.MSG_MEASURE_DELAY -> {

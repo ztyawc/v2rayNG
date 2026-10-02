@@ -18,6 +18,34 @@ class ZipUtilTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun backupArchiveRoundTripsMultipleStoreFiles() {
+        val source = temporaryFolder.newFolder("stores")
+        File(source, "MAIN").writeText("index")
+        File(source, "PROFILE_FULL_CONFIG").writeText("payload")
+        val archive = File(temporaryFolder.root, "backup.zip")
+        assertTrue(ZipUtil.zipFromFolder(source.absolutePath, archive.absolutePath))
+        val restored = File(temporaryFolder.root, "restored")
+        assertTrue(ZipUtil.unzipToFolder(archive, restored.absolutePath))
+        assertEquals("index", File(restored, "MAIN").readText())
+        assertEquals("payload", File(restored, "PROFILE_FULL_CONFIG").readText())
+        assertTrue(archive.delete())
+        assertFalse(ZipUtil.zipFromFolder("", archive.absolutePath))
+    }
+
+    @Test
+    fun expiredArchiveCleanupKeepsRecentFilesAndOtherCacheEntries() {
+        val old = temporaryFolder.newFile("old.zip").apply { setLastModified(1000) }
+        val boundary = temporaryFolder.newFile("boundary.zip").apply { setLastModified(2000) }
+        val recent = temporaryFolder.newFile("recent.zip").apply { setLastModified(3000) }
+        val other = temporaryFolder.newFile("other.txt").apply { setLastModified(1000) }
+        val directory = temporaryFolder.newFolder("folder.zip").apply { setLastModified(1000) }
+        ZipUtil.removeExpiredArchives(temporaryFolder.root, 2000)
+        assertFalse(old.exists())
+        listOf(boundary, recent, other, directory).forEach { assertTrue(it.exists()) }
+        ZipUtil.removeExpiredArchives(File(temporaryFolder.root, "missing"), 2000)
+    }
+
+    @Test
     fun unzipToFolderExtractsNestedFile() {
         val archive = createArchive("nested/config" to "value".toByteArray())
         val destination = File(temporaryFolder.root, "destination")

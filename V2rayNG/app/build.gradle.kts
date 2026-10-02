@@ -8,11 +8,14 @@ plugins {
 android {
     namespace = "com.v2ray.ang"
     compileSdk = 37
+    buildToolsVersion = "37.0.0"
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.v2ray.ang"
         minSdk = 24
         targetSdk = 37
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Keep this greater than both the prior telecom build and upstream 2.3.7.
         // The telecom flavor's ABI-specific code is derived from this value.
         versionCode = 748
@@ -30,13 +33,10 @@ android {
                     include(*abiFilterList.toTypedArray())
                 } else {
                     include(
-                        "arm64-v8a",
-                        "armeabi-v7a",
-                        "x86_64",
-                        "x86"
+                        "arm64-v8a"
                     )
                 }
-                isUniversalApk = abiFilterList.isNullOrEmpty()
+                isUniversalApk = false
             }
         }
 
@@ -221,6 +221,7 @@ dependencies {
 
     // Testing Libraries
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     testImplementation(libs.org.mockito.mockito.inline)

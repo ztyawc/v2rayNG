@@ -30,12 +30,10 @@ import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import java.io.File
 import java.io.FileOutputStream
-import kotlin.random.Random
 
 object SettingsManager {
 
-    @Volatile
-    private var runtimeSocksPort: Int? = null
+    private const val RUNTIME_SOCKS_PORT = "runtime_socks_port"
 
     fun initApp(context: Context) {
         ensureDefaultSettings()
@@ -259,7 +257,7 @@ object SettingsManager {
     fun getSocksPort(): Int {
         val port =
             if (IsDynamicSocksPort()) {
-                runtimeSocksPort ?: refreshRuntimeSocksPort()
+                MmkvManager.decodeSettingsString(RUNTIME_SOCKS_PORT)?.toIntOrNull()
             } else {
                 Utils.parseInt(MmkvManager.decodeSettingsString(AppConfig.PREF_SOCKS_PORT), AppConfig.PORT_SOCKS.toInt())
             }
@@ -269,10 +267,16 @@ object SettingsManager {
     @Synchronized
     fun refreshRuntimeSocksPort(): Int? {
         if (IsDynamicSocksPort()) {
-            runtimeSocksPort = generateRandomSocksPort()
-            return runtimeSocksPort
+            // Only the daemon's serialized setup allocates; every process reads this same value.
+            val port = Utils.findRandomFreePort()
+            check(MmkvManager.encodeSettings(RUNTIME_SOCKS_PORT, port.toString())) { "Failed to publish runtime SOCKS port" }
+            return port
         }
         return null
+    }
+
+    fun clearRuntimeSocksPort() {
+        check(MmkvManager.encodeSettings(RUNTIME_SOCKS_PORT, null as String?)) { "Failed to clear runtime SOCKS port" }
     }
 
     fun getSocksUsername(): String? {
@@ -295,34 +299,66 @@ object SettingsManager {
         return MmkvManager.decodeSettingsBool(AppConfig.PREF_DYNAMIC_SOCKS_PORT, false)
     }
 
-    private fun generateRandomSocksPort(): Int {
-        return Random.nextInt(10000, 65535)
-    }
-
     /**
      * Initialize assets.
      * @param context The application context.
      * @param assets The AssetManager.
      */
-    fun initAssets(context: Context, assets: AssetManager) {
+    fun initAssets(context: Context, assets: AssetManager): Boolean {
         val extFolder = Utils.userAssetPath(context)
-
         try {
             val geo = arrayOf(AppConfig.GEOSITE_DAT, AppConfig.GEOIP_DAT, AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT)
-            assets.list("")
-                ?.filter { geo.contains(it) }
-                ?.filter { !File(extFolder, it).exists() }
-                ?.forEach {
-                    val target = File(extFolder, it)
-                    assets.open(it).use { input ->
-                        FileOutputStream(target).use { output ->
-                            input.copyTo(output)
-                        }
+            // UI and daemon can initialize together. Serialize writers across processes,
+            // and publish each bundled asset only after its complete contents are durable.
+            synchronized(this) {
+                FileOutputStream(File(extFolder, ".bundled-assets.lock"), true).channel.use { channel ->
+                    channel.lock().use {
+                        installBundledAssets(geo.map { File(extFolder, it) }) { assets.open(it.name) }
                     }
-                    LogUtil.i(AppConfig.TAG, "Copied from apk assets folder to ${target.absolutePath}")
                 }
+            }
+            return true
         } catch (e: Exception) {
             LogUtil.e(ANG_PACKAGE, "asset copy failed", e)
+            return false
+        }
+    }
+
+    internal fun installBundledAssets(targets: List<File>, open: (File) -> java.io.InputStream) {
+        val missing = targets.filter { !it.isFile || it.length() == 0L }
+        check(missing.none { it.exists() && !it.isFile }) { "Invalid bundled asset destination" }
+        val previouslyEmpty = missing.filter { it.exists() }.toSet()
+        try {
+            missing.forEach { target -> installBundledAsset(target) { open(target) } }
+        } catch (failure: Exception) {
+            missing.forEach { target ->
+                try {
+                    if (target in previouslyEmpty) {
+                        FileOutputStream(target).use { it.fd.sync() }
+                    } else {
+                        check(!target.exists() || target.delete()) { "Unable to roll back bundled asset" }
+                    }
+                } catch (rollbackFailure: Exception) {
+                    failure.addSuppressed(rollbackFailure)
+                }
+            }
+            throw failure
+        }
+    }
+
+    internal fun installBundledAsset(target: File, open: () -> java.io.InputStream) {
+        if (target.isFile && target.length() > 0) return
+        val temporary = File.createTempFile(target.name, ".tmp", target.parentFile)
+        try {
+            open().use { input ->
+                FileOutputStream(temporary).use { output ->
+                    input.copyTo(output)
+                    output.fd.sync()
+                }
+            }
+            check(temporary.length() > 0 && temporary.renameTo(target)) { "Unable to publish bundled asset" }
+        } finally {
+            temporary.delete()
         }
     }
 
@@ -551,7 +587,7 @@ object SettingsManager {
 
         // Update each subscription's serverList (including default subscription)
         subscriptionServerMap.forEach { (subId, serverGuids) ->
-            MmkvManager.encodeServerList(serverGuids, subId)
+            MmkvManager.reorderServerList(serverGuids, subId)
         }
 
 

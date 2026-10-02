@@ -5,6 +5,8 @@ import com.v2ray.ang.AppConfig.LOOPBACK
 import com.v2ray.ang.BuildConfig
 import com.v2ray.ang.dto.UrlContentRequest
 import okhttp3.Credentials
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -13,9 +15,7 @@ import java.net.IDN
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.MalformedURLException
 import java.net.Proxy
-import java.net.URI
 import java.net.URL
 import java.util.concurrent.TimeUnit
 
@@ -116,9 +116,6 @@ object HttpUtil {
             .url(url)
             .get()
             .header("Connection", "close")
-        if (request.httpPort != 0 && !request.proxyUsername.isNullOrBlank() && !request.proxyPassword.isNullOrBlank()) {
-            requestBuilder.header("Proxy-Authorization", Credentials.basic(request.proxyUsername, request.proxyPassword))
-        }
         try {
             client.newCall(requestBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -128,7 +125,7 @@ object HttpUtil {
                 return response.body?.string()
             }
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to get URL content", e)
+            LogUtil.e(AppConfig.TAG, "HTTP content request failed", IOException(e.javaClass.simpleName))
         }
         return null
     }
@@ -144,38 +141,38 @@ object HttpUtil {
      */
     @Throws(IOException::class)
     fun getUrlContentWithUserAgent(request: UrlContentRequest): String {
-        var currentUrl = request.url
+        var currentUrl = request.url?.toHttpUrl() ?: throw IOException("Missing request URL")
         var redirects = 0
         val maxRedirects = 3
+        val client = buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = false)
+        val headersMap = JsonUtil.parseHeadersToMap(request.requestHeaders)
+        var forwardCredentials = true
+        val basicAuth = if (currentUrl.encodedUsername.isNotEmpty()) {
+            Credentials.basic(currentUrl.username, currentUrl.password)
+        } else null
 
-        while (redirects++ < maxRedirects) {
-            if (currentUrl == null) continue
-            val client = buildOkHttpClient(request.timeout, request.httpPort, request.proxyUsername, request.proxyPassword, followRedirects = false)
+        while (redirects <= maxRedirects) {
             val finalUserAgent = if (request.userAgent.isNullOrBlank()) {
                 "v2rayNG/${BuildConfig.VERSION_NAME}"
             } else {
                 request.userAgent
             }
             val requestBuilder = Request.Builder()
-                .url(currentUrl)
+                .url(currentUrl.newBuilder().username("").password("").build())
                 .get()
                 .header("User-agent", finalUserAgent)
                 .header("Connection", "close")
 
-            applyEmbeddedBasicAuthHeader(currentUrl, requestBuilder)
-
-
-            val headersMap = JsonUtil.parseHeadersToMap(request.requestHeaders)
-            for ((key, value) in headersMap) {
-                LogUtil.d(AppConfig.TAG, "Adding custom header: $key = $value")
-                try {
-                    requestBuilder.header(key, value)
-                } catch (_: IllegalArgumentException) {
+            if (forwardCredentials) {
+                basicAuth?.let { requestBuilder.header("Authorization", it) }
+                for ((key, value) in headersMap) {
+                    if (key.equals("Proxy-Authorization", ignoreCase = true)) continue
+                    try {
+                        requestBuilder.header(key, value)
+                    } catch (error: IllegalArgumentException) {
+                        throw IOException("Invalid subscription request header", IOException(error.javaClass.simpleName))
+                    }
                 }
-            }
-
-            if (request.httpPort != 0 && !request.proxyUsername.isNullOrBlank() && !request.proxyPassword.isNullOrBlank()) {
-                requestBuilder.header("Proxy-Authorization", Credentials.basic(request.proxyUsername, request.proxyPassword))
             }
 
             client.newCall(requestBuilder.build()).execute().use { response ->
@@ -185,10 +182,10 @@ object HttpUtil {
                         if (location.isNullOrEmpty()) {
                             throw IOException("Redirect location not found")
                         }
-                        currentUrl = resolveLocation(currentUrl, location)
-                        if (currentUrl.isNullOrEmpty()) {
-                            throw IOException("Failed to resolve redirect location")
-                        }
+                        val nextUrl = redirectTarget(currentUrl, location)
+                        forwardCredentials = forwardCredentials && sameOrigin(currentUrl, nextUrl)
+                        currentUrl = nextUrl
+                        redirects++
                         continue
                     }
 
@@ -205,18 +202,13 @@ object HttpUtil {
         throw IOException("Too many redirects")
     }
 
-    private fun applyEmbeddedBasicAuthHeader(rawUrl: String, requestBuilder: Request.Builder) {
-        val parsed = runCatching { URL(rawUrl) }.getOrNull() ?: return
-        parsed.userInfo?.let { userInfo ->
-            val colon = userInfo.indexOf(':')
-            val user = runCatching {
-                Utils.decodeURIComponent(if (colon >= 0) userInfo.substring(0, colon) else userInfo)
-            }.getOrDefault(if (colon >= 0) userInfo.substring(0, colon) else userInfo)
-            val pass = runCatching {
-                Utils.decodeURIComponent(if (colon >= 0) userInfo.substring(colon + 1) else "")
-            }.getOrDefault(if (colon >= 0) userInfo.substring(colon + 1) else "")
-            requestBuilder.header("Authorization", Credentials.basic(user, pass))
-        }
+    internal fun sameOrigin(from: HttpUrl, to: HttpUrl): Boolean =
+        from.scheme == to.scheme && from.host == to.host && from.port == to.port
+
+    internal fun redirectTarget(from: HttpUrl, location: String): HttpUrl {
+        val target = from.resolve(location) ?: throw IOException("Invalid redirect location")
+        if (from.isHttps && !target.isHttps) throw IOException("HTTPS redirect downgrade rejected")
+        return target
     }
 
     private fun buildOkHttpClient(
@@ -230,7 +222,7 @@ object HttpUtil {
             .connectTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(timeout.toLong(), TimeUnit.MILLISECONDS)
             .followRedirects(followRedirects)
-            .followSslRedirects(followRedirects)
+            .followSslRedirects(false)
 
         if (httpPort != 0) {
             builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(LOOPBACK, httpPort)))
@@ -250,25 +242,6 @@ object HttpUtil {
         return builder.build()
     }
 
-    private fun resolveLocation(baseUrl: String, raw: String): String? {
-        return try {
-            val locUri = URI(raw)
-            val baseUri = URI(baseUrl)
-            val resolved = if (locUri.isAbsolute) locUri else baseUri.resolve(locUri)
-            resolved.toURL().toString()
-        } catch (_: Exception) {
-            try {
-                URL(raw).toString()
-            } catch (_: MalformedURLException) {
-                try {
-                    URL(URL(baseUrl), raw).toString()
-                } catch (_: MalformedURLException) {
-                    null
-                }
-            }
-        }
-    }
-
     fun downloadToFile(
         request: UrlContentRequest,
         targetFile: File
@@ -279,14 +252,11 @@ object HttpUtil {
             .url(url)
             .get()
             .header("Connection", "close")
-        if (request.httpPort != 0 && !request.proxyUsername.isNullOrBlank() && !request.proxyPassword.isNullOrBlank()) {
-            requestBuilder.header("Proxy-Authorization", Credentials.basic(request.proxyUsername, request.proxyPassword))
-        }
 
         return try {
             client.newCall(requestBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) {
-                    LogUtil.w(AppConfig.TAG, "Failed to download file, code=${response.code}, url=$url")
+                    LogUtil.w(AppConfig.TAG, "HTTP download failed, code=${response.code}")
                     return false
                 }
                 val body = response.body ?: return false
@@ -298,7 +268,7 @@ object HttpUtil {
                 true
             }
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to download file: $url", e)
+            LogUtil.e(AppConfig.TAG, "HTTP download failed", IOException(e.javaClass.simpleName))
             false
         }
     }

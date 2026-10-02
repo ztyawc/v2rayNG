@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">подробности отсутствуют</string>
     <string name="value_unknown">неизвестно</string>
 
+    <string name="server_qyproxy">CN2 / CN2 загрузки</string>
+    <string name="menu_item_import_config_manually_qyproxy">Ввести вручную [CN2 / CN2 загрузки]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">CN2 загрузки</string>
+    <string name="qyproxy_sn">SN устройства</string>
+    <string name="qyproxy_game_id">ID игры</string>
+    <string name="qyproxy_server_id">ID сервера</string>
+    <string name="qyproxy_game_area">Регион игры</string>
+    <string name="qyproxy_zone">Зона</string>
+    <string name="qyproxy_client_type">Тип клиента</string>
+    <string name="qyproxy_product">Продукт клиента</string>
+    <string name="qyproxy_version">Версия клиента</string>
+    <string name="qyproxy_credentials_hint">Укажите исходное имя пользователя узла, отдельный секрет CN2, фактический порт управления, SN устройства, ID игры и сервера.</string>
+    <string name="qyproxy_invalid_config">Проверьте обязательные поля, IPv4 или имя узла, порт (1–65535) и ID (1–4294967295).</string>
 </resources>

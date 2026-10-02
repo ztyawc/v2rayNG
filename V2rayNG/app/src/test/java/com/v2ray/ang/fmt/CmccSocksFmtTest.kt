@@ -13,6 +13,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CmccSocksFmtTest {
+    @Test fun roundTripPreservesEncodedColonPlusPercentAndFragment() {
+        val original = profile().apply {
+            username = "user:name+%"
+            password = "pass:word+%"
+            remarks = "Node%2FShanghai + 東京"
+        }
+        val restored = CmccSocksFmt.parse(AppConfig.CMCC_SOCKS + CmccSocksFmt.toUri(original))!!
+        assertEquals(original.username, restored.username)
+        assertEquals(original.password, restored.password)
+        assertEquals(original.remarks, restored.remarks)
+    }
+
+    @Test fun readsPreviousReleasedWholeCredentialEncoding() {
+        val restored = CmccSocksFmt.parse("cmcc://test-user%3Atest%3Apassword@private-socks.example.test:10800?auth=0x80#Node%252FShanghai")!!
+        assertEquals("test-user", restored.username)
+        assertEquals("test:password", restored.password)
+        assertEquals("Node%2FShanghai", restored.remarks)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun unsupportedAuthCannotSilentlyShareAsAuth80() { CmccSocksFmt.toUri(profile("0x81")) }
 
     private fun profile(auth: String = "0x80") = ProfileItem.create(EConfigType.PRIVATE_SOCKS).apply {
         remarks = "Private SOCKS test node"

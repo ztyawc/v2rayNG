@@ -14,6 +14,7 @@ import com.v2ray.ang.ui.base.ViewModelEvent
 import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.ZipUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,7 +30,6 @@ class BackupViewModel(application: Application) : BaseViewModel(application) {
 
     sealed interface BackupViewModelEvent : ViewModelEvent {
         data class ShareFile(val filePath: String) : BackupViewModelEvent
-        data class ExportLocal(val cachePath: String, val targetUri: Uri) : BackupViewModelEvent
         object RestoreSuccess : BackupViewModelEvent
     }
 
@@ -70,10 +70,72 @@ class BackupViewModel(application: Application) : BaseViewModel(application) {
 
     fun prepareBackupForUri(cacheDir: File, appName: String, targetUri: Uri) {
         launchLoading {
-            val ret = backupConfigurationToCache(cacheDir, appName)
-            if (ret.first) {
-                _viewModelEvent.send(BackupViewModelEvent.ExportLocal(ret.second, targetUri))
-            } else {
+            try {
+                val ret = backupConfigurationToCache(cacheDir, appName)
+                if (!ret.first) {
+                    toastError(R.string.toast_failure)
+                    return@launchLoading
+                }
+                copyBackupToUri(ret.second, targetUri)
+                toastSuccess(R.string.toast_success)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                LogUtil.e(AppConfig.TAG, "Backup export to document failed", error)
+                toastError(R.string.toast_failure)
+            }
+        }
+    }
+
+    fun exportLocal(cachePath: String, targetUri: Uri) {
+        launchLoading {
+            try {
+                copyBackupToUri(cachePath, targetUri)
+                toastSuccess(R.string.toast_success)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                LogUtil.e(AppConfig.TAG, "Backup export to document failed", error)
+                toastError(R.string.toast_failure)
+            }
+        }
+    }
+
+    private suspend fun copyBackupToUri(cachePath: String, targetUri: Uri) = withContext(Dispatchers.IO) {
+        val archive = File(cachePath)
+        try {
+            checkNotNull(app.contentResolver.openOutputStream(targetUri)) { "Unable to open backup destination" }.use { output ->
+                archive.inputStream().use { it.copyTo(output) }
+            }
+        } finally {
+            archive.delete()
+        }
+    }
+
+    fun restoreFromUri(cacheDir: File, uri: Uri) {
+        launchLoading {
+            try {
+                val success = withContext(Dispatchers.IO) {
+                    val archive = File.createTempFile("restore_", ".zip", cacheDir)
+                    try {
+                        checkNotNull(app.contentResolver.openInputStream(uri)) { "Unable to open restore source" }.use { input ->
+                            archive.outputStream().use { input.copyTo(it) }
+                        }
+                        performRestore(cacheDir, archive)
+                    } finally {
+                        archive.delete()
+                    }
+                }
+                if (success) {
+                    toastSuccess(R.string.toast_success)
+                    _viewModelEvent.send(BackupViewModelEvent.RestoreSuccess)
+                } else {
+                    toastError(R.string.toast_failure)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                LogUtil.e(AppConfig.TAG, "Backup restore from document failed", error)
                 toastError(R.string.toast_failure)
             }
         }
@@ -164,24 +226,33 @@ class BackupViewModel(application: Application) : BaseViewModel(application) {
         }
     }
 
-    private fun backupConfigurationToCache(cacheDir: File, appName: String): Pair<Boolean, String> {
+    private suspend fun backupConfigurationToCache(cacheDir: File, appName: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val dateFormatted = SimpleDateFormat(
             "yyyy-MM-dd-HH-mm-ss",
             Locale.getDefault()
         ).format(System.currentTimeMillis())
-        val folderName = "${appName}_$dateFormatted"
-        val backupDir = cacheDir.absolutePath + "/$folderName"
-        val outputZipFilePath = "${cacheDir.absolutePath}/$folderName.zip"
-
-        val count = MMKV.backupAllToDirectory(backupDir)
-        if (count <= 0) {
-            return Pair(false, "")
-        }
-
-        return if (ZipUtil.zipFromFolder(backupDir, outputZipFilePath)) {
-            Pair(true, outputZipFilePath)
-        } else {
-            Pair(false, "")
+        val archiveDir = File(cacheDir, "configuration_backups")
+        // Receivers can read after the share chooser returns. Retain archives for one day,
+        // then clean them on the next backup instead of deleting an in-flight attachment.
+        val folderName = "${appName}_${dateFormatted}_${System.nanoTime()}"
+        val backupDir = File(archiveDir, folderName)
+        val outputZip = File(archiveDir, "$folderName.zip")
+        try {
+            check(archiveDir.isDirectory || archiveDir.mkdirs()) { "Unable to create backup cache" }
+            ZipUtil.removeExpiredArchives(archiveDir, System.currentTimeMillis() - 24 * 60 * 60 * 1000L)
+            if (MmkvManager.backupConfigurationToDirectory(backupDir.absolutePath) <= 0 ||
+                !ZipUtil.zipFromFolder(backupDir.absolutePath, outputZip.absolutePath)) {
+                outputZip.delete()
+                return@withContext false to ""
+            }
+            true to outputZip.absolutePath
+        } catch (error: Exception) {
+            outputZip.delete()
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            LogUtil.e(AppConfig.TAG, "Backup archive creation failed", error)
+            false to ""
+        } finally {
+            backupDir.deleteRecursively()
         }
     }
 

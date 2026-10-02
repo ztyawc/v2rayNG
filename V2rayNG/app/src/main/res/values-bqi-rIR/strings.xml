@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">دووسمندی نؽ</string>
     <string name="value_unknown">نا مؽخص</string>
 
+    <string name="server_qyproxy">CN2 / دانلود CN2</string>
+    <string name="menu_item_import_config_manually_qyproxy">وارد کردن دستی [CN2 / دانلود CN2]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">دانلود CN2</string>
+    <string name="qyproxy_sn">SN دستگاه</string>
+    <string name="qyproxy_game_id">شناسه بازی</string>
+    <string name="qyproxy_server_id">شناسه سرور</string>
+    <string name="qyproxy_game_area">منطقه بازی</string>
+    <string name="qyproxy_zone">ناحیه</string>
+    <string name="qyproxy_client_type">نوع کارخواه</string>
+    <string name="qyproxy_product">محصول کارخواه</string>
+    <string name="qyproxy_version">نسخه کارخواه</string>
+    <string name="qyproxy_credentials_hint">نام کاربری اصلی گره، رمز ویژه CN2، درگاه کنترل، SN دستگاه و شناسه بازی و سرور را بنویسید.</string>
+    <string name="qyproxy_invalid_config">فیلدهای لازم، IPv4 یا نام گره، درگاه (1–65535) و شناسه‌ها (1–4294967295) را بررسی کنید.</string>
 </resources>

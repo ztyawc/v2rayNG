@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">কোনো বিবরণ পাওয়া যায়নি</string>
     <string name="value_unknown">অজানা</string>
 
+    <string name="server_qyproxy">CN2 / CN2 ডাউনলোড</string>
+    <string name="menu_item_import_config_manually_qyproxy">ম্যানুয়াল ইনপুট [CN2 / CN2 ডাউনলোড]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">CN2 ডাউনলোড</string>
+    <string name="qyproxy_sn">ডিভাইস SN</string>
+    <string name="qyproxy_game_id">গেম ID</string>
+    <string name="qyproxy_server_id">সার্ভার ID</string>
+    <string name="qyproxy_game_area">গেম অঞ্চল</string>
+    <string name="qyproxy_zone">অঞ্চল</string>
+    <string name="qyproxy_client_type">ক্লায়েন্টের ধরন</string>
+    <string name="qyproxy_product">ক্লায়েন্ট পণ্য</string>
+    <string name="qyproxy_version">ক্লায়েন্ট সংস্করণ</string>
+    <string name="qyproxy_credentials_hint">নোডের মূল ব্যবহারকারীর নাম, CN2-এর নিজস্ব secret, প্রকৃত কন্ট্রোল পোর্ট, ডিভাইস SN এবং গেম ও সার্ভার ID দিন।</string>
+    <string name="qyproxy_invalid_config">প্রয়োজনীয় তথ্য, IPv4 বা নোডের নাম, পোর্ট (1–65535) এবং ID (1–4294967295) পরীক্ষা করুন।</string>
 </resources>

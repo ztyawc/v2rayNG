@@ -422,6 +422,7 @@ object Utils {
      */
     fun isValidSubUrl(value: String?): Boolean {
         if (value.isNullOrEmpty()) return false
+        if (com.v2ray.ang.fmt.HttpFmt.isProxyUri(value)) return false
 
         try {
             if (URLUtil.isHttpsUrl(value)) return true
@@ -447,11 +448,7 @@ object Utils {
      *
      * @return The receiver flags.
      */
-    fun receiverFlags(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.RECEIVER_EXPORTED
-    } else {
-        ContextCompat.RECEIVER_NOT_EXPORTED
-    }
+    fun receiverFlags(): Int = ContextCompat.RECEIVER_NOT_EXPORTED
 
     /**
      * Check if the package is Xray.

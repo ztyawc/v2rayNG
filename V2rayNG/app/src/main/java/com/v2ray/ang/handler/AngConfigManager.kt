@@ -13,8 +13,10 @@ import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.fmt.CmccSocksFmt
+import com.v2ray.ang.fmt.QyProxyFmt
 import com.v2ray.ang.fmt.CustomFmt
 import com.v2ray.ang.fmt.Hysteria2Fmt
+import com.v2ray.ang.fmt.HttpFmt
 import com.v2ray.ang.fmt.ShadowsocksFmt
 import com.v2ray.ang.fmt.SocksFmt
 import com.v2ray.ang.fmt.TrojanFmt
@@ -45,6 +47,8 @@ object AngConfigManager {
             AppConfig.SOCKS4 to SocksFmt::parse,
             AppConfig.SOCKS5 to SocksFmt::parse,
             EConfigType.PRIVATE_SOCKS.protocolScheme to CmccSocksFmt::parse,
+            EConfigType.QYPROXY.protocolScheme to QyProxyFmt::parse,
+            EConfigType.HTTP.protocolScheme to HttpFmt::parse,
             EConfigType.TROJAN.protocolScheme to TrojanFmt::parse,
             EConfigType.VLESS.protocolScheme to VlessFmt::parse,
             EConfigType.WIREGUARD.protocolScheme to WireguardFmt::parse,
@@ -162,11 +166,13 @@ object AngConfigManager {
                 EConfigType.SHADOWSOCKS -> ShadowsocksFmt.toUri(config)
                 EConfigType.SOCKS -> SocksFmt.toUri(config)
                 EConfigType.PRIVATE_SOCKS -> CmccSocksFmt.toUri(config)
+                EConfigType.QYPROXY -> QyProxyFmt.toUri(config)
+                EConfigType.HTTP -> HttpFmt.toUri(config)
                 EConfigType.VLESS -> VlessFmt.toUri(config)
                 EConfigType.TROJAN -> TrojanFmt.toUri(config)
                 EConfigType.WIREGUARD -> WireguardFmt.toUri(config)
                 EConfigType.HYSTERIA2 -> Hysteria2Fmt.toUri(config)
-                else -> {}
+                else -> return ""
             }
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to share config for GUID: $guid", e)
@@ -485,7 +491,7 @@ object AngConfigManager {
                     return SubscriptionUpdateResult(failureCount = 1)
                 }
             }
-            LogUtil.i(AppConfig.TAG, url)
+            LogUtil.i(AppConfig.TAG, "Subscription request group=${it.guid}")
             val userAgent = it.subscription.userAgent
             val requestHeaders = it.subscription.requestHeaders
             val proxyUsername = SettingsManager.getSocksUsername()
@@ -505,7 +511,7 @@ object AngConfigManager {
                     )
                 )
             } catch (e: Exception) {
-                LogUtil.e(AppConfig.ANG_PACKAGE, "Update subscription: proxy not ready or other error", e)
+                LogUtil.e(AppConfig.TAG, "Subscription proxy request failed group=${it.guid}", java.io.IOException(e.javaClass.simpleName))
                 ""
             }
             if (configText.isEmpty()) {
@@ -518,7 +524,7 @@ object AngConfigManager {
                         )
                     )
                 } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "Update subscription: Failed to get URL content with user agent", e)
+                    LogUtil.e(AppConfig.TAG, "Subscription direct request failed group=${it.guid}", java.io.IOException(e.javaClass.simpleName))
                     ""
                 }
             }
@@ -577,7 +583,7 @@ object AngConfigManager {
             .sortedBy { it.second }
             .map { it.first }
             .toMutableList()
-        MmkvManager.encodeServerList(sorted, subId)
+        MmkvManager.reorderServerList(sorted, subId)
     }
 
     /**

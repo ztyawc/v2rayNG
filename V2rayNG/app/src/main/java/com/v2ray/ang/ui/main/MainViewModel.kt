@@ -3,6 +3,9 @@ package com.v2ray.ang.ui.main
 import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.R
@@ -16,7 +19,6 @@ import com.v2ray.ang.dto.entities.SubscriptionCache
 import com.v2ray.ang.extension.delay
 import com.v2ray.ang.extension.isComplexType
 import com.v2ray.ang.extension.matchesPattern
-import com.v2ray.ang.extension.moveItem
 import com.v2ray.ang.ui.base.BaseViewModel
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.CancellationException
@@ -42,28 +44,28 @@ import java.util.regex.PatternSyntaxException
 
 class MainViewModel(
     application: Application,
-    private val dataSource: MainDataSource
+    private val dataSource: MainDataSource,
+    private val savedState: SavedStateHandle = SavedStateHandle(),
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) : BaseViewModel(application) {
 
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
-    private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
-    private val preloadDispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
+    private val preloadDispatcher: CoroutineDispatcher = ioDispatcher.limitedParallelism(1)
 
     // ---------- UI state ----------
     private val _uiState = MutableStateFlow(
         MainUiState(
-            selectedGroupId = dataSource.getSelectedSubscriptionId(),
-            selectedGuid = dataSource.getSelectServer(),
-            confirmRemove = dataSource.getConfirmRemove(),
-            doubleColumnDisplay = dataSource.getDoubleColumnDisplay()
+            searchQuery = savedState["searchQuery"] ?: "",
+            searchVisible = savedState["searchVisible"] ?: false
         )
     )
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
     // ---------- Keyword filtering ----------
     @Volatile
-    private var keywordFilter: String = ""
+    private var keywordFilter: String = _uiState.value.searchQuery
     private var filterJob: Job? = null
+    private var qrCodeJob: Job? = null
 
     // ---------- Groups & cache ----------
     private val cacheMutex = Mutex()
@@ -77,6 +79,7 @@ class MainViewModel(
     private var preloadJob: Job? = null
     private var selectedGroupLoadJob: Job? = null
     private var reloadJob: Job? = null
+    private var initializedSelection = false
 
     @Volatile
     private var testingGroupId: String? = null
@@ -116,11 +119,16 @@ class MainViewModel(
                 _uiState.update { it.copy(status = MainStatus.ConnectionTest(event.result)) }
             }
 
-            MainServiceEvent.MeasureConfigSuccess -> {
+            is MainServiceEvent.MeasureConfigSuccess -> {
                 viewModelScope.launch(ioDispatcher) {
-                    val gid = testingGroupId ?: uiState.value.selectedGroupId
-                    cacheMutex.withLock { groupDataCache.remove(gid) }
-                    updateGroupUi(gid, loadGroup(gid, forceRefresh = true))
+                    if (event.guid.isBlank()) return@launch
+                    val delay = dataSource.decodeAffiliationInfo(event.guid)?.testDelayMillis ?: return@launch
+                    val updated = cacheMutex.withLock {
+                        groupDataCache.filterValues { servers -> servers.any { it.guid == event.guid } }
+                            .mapValues { (_, servers) -> servers.map { if (it.guid == event.guid) it.copy(testDelayMillis = delay) else it } }
+                            .also { groupDataCache.putAll(it) }
+                    }
+                    updated.forEach { (gid, servers) -> updateGroupUi(gid, servers) }
                 }
             }
 
@@ -205,14 +213,38 @@ class MainViewModel(
             is MainAction.SelectServer -> updateSelectedGuid(action.guid)
             is MainAction.RemoveServer -> removeServerAndRefresh(action.guid)
             is MainAction.Search -> filterConfig(action.query)
+            is MainAction.ShowSearch -> {
+                savedState["searchVisible"] = action.visible
+                _uiState.update { it.copy(searchVisible = action.visible) }
+                if (!action.visible) filterConfig("")
+            }
+            is MainAction.MoveServer -> moveServer(action.groupId, action.fromGuid, action.toGuid)
             is MainAction.ImportBatchConfig -> importBatchConfig(action.configText)
             MainAction.LocateHandled -> consumeLocateTarget()
             is MainAction.ShareQRCode -> {
-                val bitmap = dataSource.share2QRCode(action.guid)
-                _uiState.update { it.copy(shareQRCodeBitmap = bitmap) }
+                qrCodeJob?.cancel()
+                qrCodeJob = viewModelScope.launch(ioDispatcher) {
+                    try {
+                        val bitmap = dataSource.share2QRCode(action.guid)
+                        withContext(Dispatchers.Main) {
+                            ensureActive()
+                            _uiState.update { it.copy(shareQRCodeBitmap = bitmap) }
+                            if (bitmap == null) toastError(R.string.toast_failure)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        LogUtil.e(AppConfig.TAG, "MainViewModel QR generation guid=${action.guid} failed", failure)
+                        withContext(Dispatchers.Main) {
+                            _uiState.update { it.copy(shareQRCodeBitmap = null) }
+                            toastError(R.string.toast_failure)
+                        }
+                    }
+                }
             }
 
             MainAction.DismissQRCodeDialog -> {
+                qrCodeJob?.cancel()
                 _uiState.update { it.copy(shareQRCodeBitmap = null) }
             }
 
@@ -365,6 +397,11 @@ class MainViewModel(
 
         return viewModelScope.launch(ioDispatcher) {
             try {
+                if (!initializedSelection) {
+                    _uiState.update { it.copy(selectedGroupId = dataSource.getSelectedSubscriptionId(),
+                        confirmRemove = dataSource.getConfirmRemove(), doubleColumnDisplay = dataSource.getDoubleColumnDisplay()) }
+                    initializedSelection = true
+                }
                 if (forceRefresh) {
                     cacheMutex.withLock { groupDataCache.clear() }
                 }
@@ -666,6 +703,8 @@ class MainViewModel(
     fun filterConfig(keyword: String) {
         if (keyword == keywordFilter) return
         keywordFilter = keyword
+        savedState["searchQuery"] = keyword
+        _uiState.update { it.copy(searchQuery = keyword, isFiltering = true) }
         filterJob?.cancel()
         filterJob = viewModelScope.launch(defaultDispatcher) {
             delay(300)
@@ -675,6 +714,8 @@ class MainViewModel(
                 ensureActive()
                 updateGroupUi(groupId, servers)
             }
+            ensureActive()
+            _uiState.update { if (it.searchQuery == keyword) it.copy(isFiltering = false) else it }
         }
     }
 
@@ -699,20 +740,21 @@ class MainViewModel(
         }
     }
 
-    fun moveServer(groupId: String, fromPosition: Int, toPosition: Int) {
-        val groupState = mutableServerGroupState(groupId).value
-        val servers = groupState.servers.toMutableList()
-        if (!servers.moveItem(fromPosition, toPosition)) return
-        val rows = groupState.rows.toMutableList()
-        rows.moveItem(fromPosition, toPosition)
-        val guids = servers.map { it.guid }
-        mutableServerGroupState(groupId).value = ServerGroupUiState(servers, rows)
-        // A drag emits several moves; serialize writes so an older order cannot overwrite a newer one.
+    private fun moveServer(groupId: String, fromGuid: String, toGuid: String) {
+        if (groupId.isBlank() || keywordFilter.isNotEmpty() || uiState.value.isFiltering) return
         val previousPersistenceJob = serverOrderPersistenceJobs[groupId]
         serverOrderPersistenceJobs[groupId] = viewModelScope.launch(ioDispatcher) {
             previousPersistenceJob?.join()
-            dataSource.encodeServerList(guids, groupId)
-            cacheMutex.withLock { groupDataCache[groupId] = servers }
+            try {
+                val guids = dataSource.moveServer(groupId, fromGuid, toGuid)
+                val servers = buildServersCache(guids)
+                cacheMutex.withLock { groupDataCache[groupId] = servers }
+                updateGroupUi(groupId, servers)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                LogUtil.e(AppConfig.TAG, "Main reorder failed group=$groupId", error)
+                toastError(R.string.toast_failure)
+            }
         }
     }
 
@@ -829,11 +871,15 @@ class MainViewModel(
         filterJob?.cancel()
         cancelAllPing()
         dataSource.close()
-        super.onCleared()
     }
 
     // ---------- Factory ----------
     class Factory(private val application: Application, private val dataSource: MainDataSource) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
+            require(modelClass.isAssignableFrom(MainViewModel::class.java))
+            return MainViewModel(application, dataSource, extras.createSavedStateHandle()) as T
+        }
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             if (modelClass.isAssignableFrom(MainViewModel::class.java)) {

@@ -1,0 +1,1114 @@
+diff --git a/proxy/socks/client.go b/proxy/socks/client.go
+--- a/proxy/socks/client.go
++++ b/proxy/socks/client.go
+@@ -2,7 +2,10 @@
+ 
+ import (
+ 	"context"
++	stderrors "errors"
+ 	"io"
++	gonet "net"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/xtls/xray-core/common"
+@@ -25,6 +28,10 @@
+ type Client struct {
+ 	server        *protocol.ServerSpec
+ 	policyManager policy.Manager
++	cmccMu        sync.Mutex
++	cmccClosed    bool
++	cmccRequests  map[context.Context]context.CancelFunc
++	cmccWorkers   sync.WaitGroup
+ }
+ 
+ // NewClient create a new Socks5 client based on the given config.
+@@ -65,12 +72,21 @@
+ 		cmccMode, useCMCC = cmccProtocolFromEmail(server.User.Email)
+ 	}
+ 	if useCMCC {
++		ownedCtx, finish, err := c.ownCMCCRequest(ctx)
++		if err != nil {
++			return err
++		}
++		ctx = ownedCtx
++		defer finish()
++		defer func() {
++			_ = common.Interrupt(link.Reader)
++			if ownedCtx.Err() != nil {
++				_ = common.Interrupt(link.Writer)
++			}
++		}()
+ 		// The XOR writer has to see every client-to-server byte. Mark this
+ 		// outbound as non-spliceable so kernel zero-copy cannot bypass it.
+ 		ob.CanSpliceCopy = 3
+-		if destination.Network == net.Network_UDP {
+-			return errors.New("CMCC SOCKS does not support UDP ASSOCIATE")
+-		}
+ 	} else {
+ 		ob.CanSpliceCopy = 2
+ 	}
+@@ -91,10 +107,16 @@
+ 	}
+ 
+ 	defer func() {
+-		if err := conn.Close(); err != nil {
++		if err := conn.Close(); err != nil && (!useCMCC || !stderrors.Is(err, gonet.ErrClosed)) {
+ 			errors.LogInfoInner(ctx, err, "failed to closed connection")
+ 		}
+ 	}()
++	if useCMCC {
++		// The Process owner also owns a private-auth handshake that may be
++		// blocked waiting for the relay. Cancellation must close that socket.
++		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
++		defer stop()
++	}
+ 
+ 	p := c.policyManager.ForLevel(0)
+ 
+@@ -132,6 +154,13 @@
+ 	if udpRequest != nil {
+ 		if udpRequest.Address == net.AnyIP || udpRequest.Address == net.AnyIPv6 {
+ 			udpRequest.Address = dest.Address
++			if useCMCC {
++				// With multiple DNS answers, reuse the TCP peer that accepted this
++				// association instead of resolving the configured server again.
++				if peer, ok := conn.RemoteAddr().(*net.TCPAddr); ok && len(peer.IP) != 0 && !peer.IP.IsUnspecified() {
++					udpRequest.Address = net.IPAddress(peer.IP)
++				}
++			}
+ 		}
+ 	}
+ 
+@@ -146,12 +175,21 @@
+ 	}
+ 
+ 	ctx, cancel := context.WithCancel(ctx)
++	if useCMCC {
++		defer cancel()
++		if newCancel != nil {
++			defer newCancel()
++		}
++	}
+ 	timer := signal.CancelAfterInactivity(ctx, func() {
+ 		cancel()
+ 		if newCancel != nil {
+ 			newCancel()
+ 		}
+ 	}, p.Timeouts.ConnectionIdle)
++	if useCMCC {
++		defer timer.SetTimeout(0)
++	}
+ 
+ 	var requestFunc func() error
+ 	var responseFunc func() error
+@@ -176,6 +214,9 @@
+ 			return errors.New("failed to create UDP connection").Base(err)
+ 		}
+ 		defer udpConn.Close()
++		if useCMCC {
++			return cmccRelayUDP(ctx, conn, udpConn, link, request, timer, p.Timeouts)
++		}
+ 		requestFunc = func() error {
+ 			defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
+ 			writer := &UDPWriter{Writer: udpConn, Request: request}
+@@ -201,6 +242,45 @@
+ 	return nil
+ }
+ 
++// ownCMCCRequest binds an association to this native outbound instance as well
++// as its caller. UDP dispatchers can detach caller cancellation, so the core's
++// outbound Close must cancel and join private requests before returning.
++func (c *Client) ownCMCCRequest(parent context.Context) (context.Context, func(), error) {
++	ctx, cancel := context.WithCancel(parent)
++	c.cmccMu.Lock()
++	if c.cmccClosed {
++		c.cmccMu.Unlock()
++		cancel()
++		return nil, nil, errors.New("CMCC SOCKS outbound is closed")
++	}
++	if c.cmccRequests == nil {
++		c.cmccRequests = make(map[context.Context]context.CancelFunc)
++	}
++	c.cmccRequests[ctx] = cancel
++	c.cmccWorkers.Add(1)
++	c.cmccMu.Unlock()
++	return ctx, func() {
++		cancel()
++		c.cmccMu.Lock()
++		delete(c.cmccRequests, ctx)
++		c.cmccMu.Unlock()
++		c.cmccWorkers.Done()
++	}, nil
++}
++
++// Close implements the optional native outbound lifecycle hook. Only CMCC
++// requests are registered here; ordinary SOCKS keeps its existing lifecycle.
++func (c *Client) Close() error {
++	c.cmccMu.Lock()
++	c.cmccClosed = true
++	for _, cancel := range c.cmccRequests {
++		cancel()
++	}
++	c.cmccMu.Unlock()
++	c.cmccWorkers.Wait()
++	return nil
++}
++
+ func init() {
+ 	common.Must(common.RegisterConfig((*ClientConfig)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+ 		return NewClient(ctx, config.(*ClientConfig))
+diff --git a/proxy/socks/cmcc.go b/proxy/socks/cmcc.go
+--- a/proxy/socks/cmcc.go
++++ b/proxy/socks/cmcc.go
+@@ -9,6 +9,7 @@
+ 
+ 	"github.com/xtls/xray-core/common/buf"
+ 	"github.com/xtls/xray-core/common/errors"
++	"github.com/xtls/xray-core/common/net"
+ 	"github.com/xtls/xray-core/common/protocol"
+ )
+ 
+@@ -74,8 +75,11 @@
+ }
+ 
+ func cmccClientHandshake(request *protocol.RequestHeader, reader io.Reader, writer io.Writer, mode cmccProtocol) (*protocol.RequestHeader, error) {
+-	if request.Command == protocol.RequestCommandUDP {
+-		return nil, errors.New("CMCC SOCKS does not support UDP ASSOCIATE")
++	if request.Command != protocol.RequestCommandTCP && request.Command != protocol.RequestCommandUDP {
++		return nil, errors.New("unsupported CMCC SOCKS command")
++	}
++	if mode != cmccProtocol80 && mode != cmccProtocol82 {
++		return nil, errors.New("unsupported CMCC SOCKS authentication method")
+ 	}
+ 	if request.User == nil {
+ 		return nil, errors.New("CMCC SOCKS requires a user account")
+@@ -97,7 +101,7 @@
+ 		challengeOffset = 2
+ 	}
+ 	methodReply := make([]byte, methodReplyLength)
+-	if _, err := io.ReadFull(reader, methodReply); err != nil {
++	if _, err := io.ReadFull(reader, methodReply[:2]); err != nil {
+ 		return nil, err
+ 	}
+ 	if methodReply[0] != socks5Version {
+@@ -106,6 +110,13 @@
+ 	if mode == cmccProtocol82 && methodReply[1] != byte(mode) {
+ 		return nil, errors.New("unexpected CMCC SOCKS auth method: ", methodReply[1]).AtWarning()
+ 	}
++	// A rejected 0x82 method has only two bytes. Validate them before waiting
++	// for its four-byte challenge (manual 01, section 6).
++	if mode == cmccProtocol82 {
++		if _, err := io.ReadFull(reader, methodReply[2:]); err != nil {
++			return nil, err
++		}
++	}
+ 
+ 	authRequest, err := cmccAuthenticationRequest(mode, account.Username, account.Password, methodReply[challengeOffset:])
+ 	if err != nil {
+@@ -125,11 +136,19 @@
+ 
+ 	requestBuffer := buf.New()
+ 	defer requestBuffer.Release()
+-	commonRequest := []byte{socks5Version, byte(cmdTCPConnect), 0x00 /* reserved */}
++	command := byte(cmdTCPConnect)
++	address, port := request.Address, request.Port
++	if request.Command == protocol.RequestCommandUDP {
++		command = cmdUDPAssociate
++		// These fields describe the client's UDP endpoint, not the remote
++		// application target. The dialer selects it after the relay replies.
++		address, port = net.AnyIP, 0
++	}
++	commonRequest := []byte{socks5Version, command, 0x00 /* reserved */}
+ 	if _, err := requestBuffer.Write(commonRequest); err != nil {
+ 		return nil, err
+ 	}
+-	if err := addrParser.WriteAddressPort(requestBuffer, request.Address, request.Port); err != nil {
++	if err := addrParser.WriteAddressPort(requestBuffer, address, port); err != nil {
+ 		return nil, err
+ 	}
+ 	if err := buf.WriteAllBytes(writer, requestBuffer.Bytes(), nil); err != nil {
+@@ -146,11 +165,26 @@
+ 	if responseHeader[1] != 0x00 {
+ 		return nil, errors.New("CMCC SOCKS server rejects request: ", responseHeader[1])
+ 	}
++	if responseHeader[2] != 0x00 {
++		return nil, errors.New("invalid CMCC SOCKS response reserved byte")
++	}
+ 
+ 	responseBuffer := buf.New()
+ 	defer responseBuffer.Release()
+-	if _, _, err := addrParser.ReadAddressPort(responseBuffer, reader); err != nil {
+-		return nil, err
++	address, port, err = addrParser.ReadAddressPort(responseBuffer, reader)
++	if err != nil {
++		return nil, err
++	}
++	if request.Command == protocol.RequestCommandUDP {
++		if port == 0 {
++			return nil, errors.New("invalid CMCC SOCKS UDP relay port")
++		}
++		return &protocol.RequestHeader{
++			Version: socks5Version,
++			Command: protocol.RequestCommandUDP,
++			Address: address,
++			Port:    port,
++		}, nil
+ 	}
+ 	return nil, nil
+ }
+diff --git a/proxy/socks/cmcc_test.go b/proxy/socks/cmcc_test.go
+--- a/proxy/socks/cmcc_test.go
++++ b/proxy/socks/cmcc_test.go
+@@ -129,11 +129,11 @@
+ 	}
+ }
+ 
+-func TestCMCCClientHandshakeRejectsUDP(t *testing.T) {
++func TestCMCCClientHandshakeRejectsUnsupportedCommand(t *testing.T) {
+ 	request := cmccTestRequest()
+-	request.Command = protocol.RequestCommandUDP
+-	if _, err := cmccClientHandshake(request, bytes.NewReader(nil), io.Discard, cmccProtocol80); err == nil || !strings.Contains(err.Error(), "UDP") {
+-		t.Fatalf("UDP request error = %v", err)
++	request.Command = protocol.RequestCommandMux
++	if _, err := cmccClientHandshake(request, bytes.NewReader(nil), io.Discard, cmccProtocol80); err == nil || !strings.Contains(err.Error(), "command") {
++		t.Fatalf("unsupported command error = %v", err)
+ 	}
+ }
+ 
+diff --git a/proxy/socks/cmcc_udp.go b/proxy/socks/cmcc_udp.go
+new file mode 100644
+--- /dev/null
++++ b/proxy/socks/cmcc_udp.go
+@@ -0,0 +1,146 @@
++package socks
++
++import (
++	"context"
++	"io"
++	"sync"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/errors"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/signal"
++	"github.com/xtls/xray-core/features/policy"
++	"github.com/xtls/xray-core/transport"
++)
++
++// Private UDP belongs to the CMCC association, including its control socket.
++// Keep its datagram buffers and lifetime separate from ordinary SOCKS: the
++// manual's complete-datagram XOR must never enter the ordinary transport.
++const cmccMaxUDPPacketSize = 65507
++
++type cmccUDPWriter struct {
++	writer  io.Writer
++	request *protocol.RequestHeader
++}
++
++func (w *cmccUDPWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
++	defer buf.ReleaseMulti(mb)
++	for _, b := range mb {
++		request := w.request
++		if b.UDP != nil {
++			request = &protocol.RequestHeader{Address: b.UDP.Address, Port: b.UDP.Port}
++		}
++		if request == nil || request.Address == nil {
++			return errors.New("missing CMCC SOCKS UDP target")
++		}
++		header := buf.New()
++		_, _ = header.Write([]byte{0, 0, 0})
++		err := addrParser.WriteAddressPort(header, request.Address, request.Port)
++		if err != nil {
++			header.Release()
++			return err
++		}
++		length := header.Len() + b.Len()
++		if length > cmccMaxUDPPacketSize {
++			header.Release()
++			return errors.New("CMCC SOCKS UDP datagram exceeds maximum size")
++		}
++		packet := buf.NewWithSize(length)
++		_, _ = packet.Write(header.Bytes())
++		header.Release()
++		_, _ = packet.Write(b.Bytes())
++		// One write is one datagram. A short datagram write is an error; a
++		// stream-style retry would create a second, invalid SOCKS packet.
++		n, err := (cmccXORWriter{Writer: w.writer}).Write(packet.Bytes())
++		packet.Release()
++		if err != nil {
++			return err
++		}
++		if int32(n) != length {
++			return io.ErrShortWrite
++		}
++	}
++	return nil
++}
++
++type cmccUDPReader struct {
++	ctx    context.Context
++	reader io.Reader
++}
++
++func (r *cmccUDPReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
++	for {
++		// A regular Xray buffer can truncate large UDP replies. Preserve one
++		// entire datagram and decode only ReadFrom's actual received length.
++		packet := buf.NewWithSize(65536)
++		_, err := packet.ReadFrom(r.reader)
++		if err != nil {
++			packet.Release()
++			return nil, err
++		}
++		if packet.Len() < 4 || packet.Byte(0) != 0 || packet.Byte(1) != 0 || packet.Byte(2) != 0 {
++			packet.Release()
++			errors.LogDebug(r.ctx, "discarding malformed or fragmented CMCC SOCKS UDP datagram")
++			continue
++		}
++		request, err := DecodeUDPPacket(packet)
++		if err != nil {
++			packet.Release()
++			errors.LogDebug(r.ctx, "discarding truncated CMCC SOCKS UDP datagram")
++			continue
++		}
++		destination := request.Destination()
++		packet.UDP = &destination
++		return buf.MultiBuffer{packet}, nil
++	}
++}
++
++func cmccRelayUDP(ctx context.Context, control, udp net.Conn, link *transport.Link, request *protocol.RequestHeader, timer *signal.ActivityTimer, timeouts policy.Timeout) error {
++	var workers sync.WaitGroup
++	// RFC 1928 section 6 ties the association to its TCP control connection.
++	// Closing either socket also unblocks the workers during owner cancellation.
++	defer func() {
++		_ = control.Close()
++		_ = udp.Close()
++		_ = common.Interrupt(link.Reader)
++		_ = common.Interrupt(link.Writer)
++		workers.Wait()
++	}()
++	results := make(chan error, 3)
++	for _, work := range []func() error{
++		func() error {
++			defer timer.SetTimeout(timeouts.DownlinkOnly)
++			return buf.Copy(link.Reader, &cmccUDPWriter{writer: udp, request: request}, buf.UpdateActivity(timer))
++		},
++		func() error {
++			defer timer.SetTimeout(timeouts.UplinkOnly)
++			return buf.Copy(&cmccUDPReader{ctx: ctx, reader: udp}, link.Writer, buf.UpdateActivity(timer))
++		},
++		func() error {
++			_, err := io.Copy(io.Discard, control)
++			if err == nil {
++				err = io.EOF
++			}
++			return errors.New("CMCC SOCKS UDP control connection closed").Base(err)
++		},
++	} {
++		workers.Add(1)
++		go func(work func() error) {
++			defer workers.Done()
++			results <- work()
++		}(work)
++	}
++	for finished := 0; finished < 2; finished++ {
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case err := <-results:
++			if err != nil {
++				return errors.New("CMCC SOCKS UDP association ends").Base(err)
++			}
++		}
++	}
++	return nil
++}
+diff --git a/proxy/socks/cmcc_udp_test.go b/proxy/socks/cmcc_udp_test.go
+new file mode 100644
+--- /dev/null
++++ b/proxy/socks/cmcc_udp_test.go
+@@ -0,0 +1,680 @@
++package socks
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"fmt"
++	"io"
++	gonet "net"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/features/policy"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	"github.com/xtls/xray-core/transport/pipe"
++)
++
++func TestCMCCUDPHandshake(t *testing.T) {
++	for _, mode := range []cmccProtocol{cmccProtocol80, cmccProtocol82} {
++		for _, relay := range []struct {
++			name string
++			wire []byte
++			host string
++		}{
++			{"ipv4", []byte{1, 192, 0, 2, 8, 0x12, 0x34}, "192.0.2.8"},
++			{"ipv6", append(append([]byte{4}, gonet.ParseIP("2001:db8::8").To16()...), 0x12, 0x34), "2001:db8::8"},
++			{"domain", append(append([]byte{3, 11}, []byte("udp.example")...), 0x12, 0x34), "udp.example"},
++		} {
++			t.Run(fmt.Sprintf("%x/%s", mode, relay.name), func(t *testing.T) {
++				reply := cmccUDPHandshakeReply(mode, append([]byte{5, 0, 0}, relay.wire...))
++				request := cmccTestRequest()
++				request.Command = protocol.RequestCommandUDP
++				var written bytes.Buffer
++				got, err := cmccClientHandshake(request, bytes.NewReader(reply), cmccXORWriter{Writer: &written}, mode)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if got.Command != protocol.RequestCommandUDP || got.Address != net.ParseAddress(relay.host) || got.Port != 0x1234 {
++					t.Fatalf("incorrect relay: %v", got.Destination())
++				}
++				wire := written.Bytes()
++				for i := range wire {
++					wire[i] ^= 0xff
++				}
++				if !bytes.HasSuffix(wire, []byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0}) {
++					t.Fatal("UDP ASSOCIATE must advertise the unspecified client endpoint, not the application target")
++				}
++			})
++		}
++	}
++}
++
++func cmccUDPHandshakeReply(mode cmccProtocol, reply []byte) []byte {
++	result := []byte{5, 0x7a}
++	if mode == cmccProtocol82 {
++		result = []byte{5, 0x82, 1, 2, 3, 4}
++	}
++	result = append(result, 1, 0)
++	return append(result, reply...)
++}
++
++func TestCMCCUDPHandshakeRejectsInvalidRelay(t *testing.T) {
++	for _, reply := range [][]byte{
++		{5, 0, 0, 1, 127, 0, 0, 1, 0, 0},  // zero relay port
++		{5, 0, 1, 1, 127, 0, 0, 1, 0, 53}, // reserved byte
++		{5, 7, 0, 1, 127, 0, 0, 1, 0, 53}, // unsupported command
++		{4, 0, 0, 1, 127, 0, 0, 1, 0, 53}, // version
++		{5, 0, 0, 4, 0, 0},                // truncated IPv6
++		{5, 0, 0, 3, 12, 'x'},             // truncated domain
++	} {
++		request := cmccTestRequest()
++		request.Command = protocol.RequestCommandUDP
++		if _, err := cmccClientHandshake(request, bytes.NewReader(cmccUDPHandshakeReply(cmccProtocol80, reply)), io.Discard, cmccProtocol80); err == nil {
++			t.Fatal("invalid UDP relay response was accepted")
++		}
++	}
++}
++
++func TestCMCC82RejectsMethodWithoutWaitingForChallenge(t *testing.T) {
++	client, server := gonet.Pipe()
++	defer client.Close()
++	defer server.Close()
++	_ = client.SetDeadline(time.Now().Add(time.Second))
++	done := make(chan error, 1)
++	go func() {
++		if _, err := readCMCCBytes(server, 3); err != nil {
++			done <- err
++			return
++		}
++		_, err := server.Write([]byte{5, 0xff})
++		done <- err
++	}()
++	_, err := cmccClientHandshake(cmccTestRequest(), client, cmccXORWriter{Writer: client}, cmccProtocol82)
++	if err == nil || !strings.Contains(err.Error(), "auth method") {
++		t.Fatalf("method rejection waited for missing challenge: %v", err)
++	}
++	if err := <-done; err != nil {
++		t.Fatal(err)
++	}
++}
++
++type cmccTestDatagrams struct {
++	packets [][]byte
++	short   bool
++}
++
++func (d *cmccTestDatagrams) Write(p []byte) (int, error) {
++	d.packets = append(d.packets, bytes.Clone(p))
++	if d.short {
++		return len(p) - 1, nil
++	}
++	return len(p), nil
++}
++
++func (d *cmccTestDatagrams) Read(p []byte) (int, error) {
++	if len(d.packets) == 0 {
++		return 0, io.EOF
++	}
++	packet := d.packets[0]
++	d.packets = d.packets[1:]
++	if len(p) < len(packet) {
++		return 0, io.ErrShortBuffer
++	}
++	return copy(p, packet), nil
++}
++
++func TestCMCCUDPWriterXORsEntireDatagram(t *testing.T) {
++	targets := []net.Destination{
++		net.UDPDestination(net.ParseAddress("192.0.2.1"), 53),
++		net.UDPDestination(net.ParseAddress("2001:db8::1"), 5300),
++		net.UDPDestination(net.DomainAddress("dns.example"), 5353),
++	}
++	payload := []byte{0, 1, 0x7f, 0x80, 0xff}
++	var mb buf.MultiBuffer
++	for _, target := range targets {
++		packet := buf.New()
++		_, _ = packet.Write(payload)
++		packet.UDP = &target
++		mb = append(mb, packet)
++	}
++	output := &cmccTestDatagrams{}
++	if err := (&cmccUDPWriter{writer: output}).WriteMultiBuffer(mb); err != nil {
++		t.Fatal(err)
++	}
++	if len(output.packets) != len(targets) {
++		t.Fatal("packet boundaries were lost")
++	}
++	for i, wire := range output.packets {
++		if !bytes.Equal(wire[:3], []byte{0xff, 0xff, 0xff}) {
++			t.Fatal("SOCKS UDP header was not XORed")
++		}
++		for j := range wire {
++			wire[j] ^= 0xff
++		}
++		host, port, offset, err := cmccTestParseAddress(wire, 3)
++		if err != nil || net.ParseAddress(host) != targets[i].Address || port != int(targets[i].Port) || !bytes.Equal(wire[offset:], payload) {
++			t.Fatalf("incorrect UDP packet %d: %v", i, err)
++		}
++	}
++}
++
++func TestCMCCUDPWriterReportsShortAndOversizedDatagrams(t *testing.T) {
++	request := &protocol.RequestHeader{Address: net.ParseAddress("192.0.2.1"), Port: 53}
++	short := &cmccTestDatagrams{short: true}
++	if err := (&cmccUDPWriter{writer: short, request: request}).WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("payload"))}); err != io.ErrShortWrite {
++		t.Fatalf("short write error = %v", err)
++	}
++	if len(short.packets) != 1 {
++		t.Fatal("short UDP write retried as a second datagram")
++	}
++	output := &cmccTestDatagrams{}
++	if err := (&cmccUDPWriter{writer: output, request: request}).WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(make([]byte, cmccMaxUDPPacketSize))}); err == nil || len(output.packets) != 0 {
++		t.Fatal("oversized UDP payload was silently sent or dropped")
++	}
++}
++
++func TestCMCCUDPReaderDropsInvalidPacketsAndPreservesLargeReply(t *testing.T) {
++	payload := bytes.Repeat([]byte{0x00, 0x80, 0xff, 'u'}, 5000)
++	header := []byte{0, 0, 0, 1, 192, 0, 2, 1, 0, 53}
++	input := &cmccTestDatagrams{packets: [][]byte{
++		{0, 0, 0, 1}, // actual received length, not unused buffer bytes
++		{0, 0, 1, 1, 192, 0, 2, 1, 0, 53},
++		{1, 0, 0, 1, 192, 0, 2, 1, 0, 53},
++		{0, 0, 0, 4, 0, 0},
++		{0, 0, 0, 3, 11, 'x'},
++		append(header, payload...),
++	}}
++	r := &cmccUDPReader{ctx: context.Background(), reader: input}
++	mb, err := r.ReadMultiBuffer()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer buf.ReleaseMulti(mb)
++	if len(mb) != 1 || !bytes.Equal(mb[0].Bytes(), payload) || mb[0].UDP.Address.String() != "192.0.2.1" || mb[0].UDP.Port != 53 {
++		t.Fatal("large unmodified downlink payload or source address was lost")
++	}
++	if _, err := r.ReadMultiBuffer(); err != io.EOF {
++		t.Fatalf("EOF = %v", err)
++	}
++}
++
++// This decoder is independent of Xray's address parser: the mock node checks
++// the actual wire, including packet length, rather than calling the encoder
++// under test to construct its expected result.
++func cmccTestParseAddress(packet []byte, offset int) (string, int, int, error) {
++	if len(packet) <= offset {
++		return "", 0, 0, io.ErrUnexpectedEOF
++	}
++	family := packet[offset]
++	offset++
++	length := 0
++	switch family {
++	case 1:
++		length = 4
++	case 4:
++		length = 16
++	case 3:
++		if len(packet) <= offset {
++			return "", 0, 0, io.ErrUnexpectedEOF
++		}
++		length = int(packet[offset])
++		offset++
++	default:
++		return "", 0, 0, fmt.Errorf("unknown address type")
++	}
++	if len(packet) < offset+length+2 {
++		return "", 0, 0, io.ErrUnexpectedEOF
++	}
++	host := string(packet[offset : offset+length])
++	if family != 3 {
++		host = gonet.IP(packet[offset : offset+length]).String()
++	}
++	offset += length
++	port := int(binary.BigEndian.Uint16(packet[offset : offset+2]))
++	return host, port, offset + 2, nil
++}
++
++type cmccTestPolicy struct{}
++
++func (cmccTestPolicy) Type() interface{}              { return policy.ManagerType() }
++func (cmccTestPolicy) Start() error                   { return nil }
++func (cmccTestPolicy) Close() error                   { return nil }
++func (cmccTestPolicy) ForLevel(uint32) policy.Session { return policy.SessionDefault() }
++func (cmccTestPolicy) ForSystem() policy.System       { return policy.System{} }
++
++type cmccTestConnection struct {
++	gonet.Conn
++	closed atomic.Bool
++}
++
++func (c *cmccTestConnection) Close() error {
++	c.closed.Store(true)
++	return c.Conn.Close()
++}
++
++type cmccTestDialer struct {
++	tcpAddress  string
++	mu          sync.Mutex
++	connections []*cmccTestConnection
++}
++
++func (d *cmccTestDialer) Dial(ctx context.Context, destination net.Destination) (stat.Connection, error) {
++	address := gonet.JoinHostPort(strings.Trim(destination.Address.String(), "[]"), fmt.Sprint(destination.Port))
++	if destination.Network == net.Network_TCP {
++		address = d.tcpAddress
++	} else if destination.Address.String() != "127.0.0.1" {
++		return nil, fmt.Errorf("UDP fallback did not use the accepted TCP peer")
++	}
++	conn, err := (&gonet.Dialer{}).DialContext(ctx, destination.Network.SystemString(), address)
++	if err != nil {
++		return nil, err
++	}
++	tracked := &cmccTestConnection{Conn: conn}
++	d.mu.Lock()
++	d.connections = append(d.connections, tracked)
++	d.mu.Unlock()
++	return tracked, nil
++}
++
++func (*cmccTestDialer) DestIpAddress() net.IP                                 { return nil }
++func (*cmccTestDialer) SetOutboundGateway(context.Context, *session.Outbound) {}
++
++func (d *cmccTestDialer) allClosed(expected int) bool {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if len(d.connections) != expected {
++		return false
++	}
++	for _, c := range d.connections {
++		if !c.closed.Load() {
++			return false
++		}
++	}
++	return true
++}
++
++func TestCMCCUDPClientEndToEnd(t *testing.T) {
++	for _, mode := range []cmccProtocol{0, cmccProtocol80, cmccProtocol82} {
++		for _, relayType := range []byte{1, 0, 4} {
++			t.Run(fmt.Sprintf("%x/relay-%d", mode, relayType), func(t *testing.T) {
++				control, udp, accepted, serverDone := cmccTestStartUDPNode(t, mode, relayType)
++				client, dialer, ctx, cancel := cmccTestStartClient(t, mode, control.Addr().String())
++				defer cancel()
++				upReader, upWriter := pipe.New()
++				downReader, downWriter := pipe.New()
++				defer upReader.Interrupt()
++				defer downReader.Interrupt()
++				done := make(chan error, 1)
++				go func() { done <- client.Process(ctx, &transport.Link{Reader: upReader, Writer: downWriter}, dialer) }()
++				for i, target := range []net.Destination{
++					net.UDPDestination(net.ParseAddress("192.0.2.9"), 53),
++					net.UDPDestination(net.ParseAddress("2001:db8::9"), 5300),
++					net.UDPDestination(net.DomainAddress("dns.example"), 5353),
++				} {
++					payload := []byte{0x12, 0x34, 0, 1, 0x80, 0xff, byte(i)}
++					if i == 2 && mode != 0 {
++						payload = bytes.Repeat(payload, 3000)
++					}
++					b := buf.NewWithSize(int32(len(payload)))
++					_, _ = b.Write(payload)
++					if i != 0 {
++						b.UDP = &target
++					}
++					if err := upWriter.WriteMultiBuffer(buf.MultiBuffer{b}); err != nil {
++						t.Fatal(err)
++					}
++					mb, err := downReader.ReadMultiBufferTimeout(3 * time.Second)
++					if err != nil {
++						t.Fatal(err)
++					}
++					ok := len(mb) == 1 && bytes.Equal(mb[0].Bytes(), payload) && *mb[0].UDP == target
++					buf.ReleaseMulti(mb)
++					if !ok {
++						t.Fatal("UDP client lost payload, packet boundary, or per-packet destination")
++					}
++				}
++				if mode != 0 {
++					// Ending only TCP must terminate the still-open UDP socket and
++					// join both pipe workers, without waiting for the idle timeout.
++					select {
++					case c := <-accepted:
++						_ = c.Close()
++					case <-time.After(time.Second):
++						t.Fatal("node did not accept control socket")
++					}
++				} else {
++					cancel()
++				}
++				select {
++				case <-done:
++				case <-time.After(2 * time.Second):
++					t.Fatal("UDP association did not stop")
++				}
++				if !dialer.allClosed(2) {
++					t.Fatal("UDP/control sockets remained open")
++				}
++				_ = udp.Close()
++				if err := <-serverDone; err != nil {
++					t.Fatal(err)
++				}
++			})
++		}
++	}
++}
++
++func cmccTestStartClient(t *testing.T, mode cmccProtocol, address string) (*Client, *cmccTestDialer, context.Context, context.CancelFunc) {
++	t.Helper()
++	_, port, _ := gonet.SplitHostPort(address)
++	serverPort, _ := net.PortFromString(port)
++	var user *protocol.MemoryUser
++	if mode != 0 {
++		user = &protocol.MemoryUser{Email: fmt.Sprintf("%s0x%x", cmccProtocolEmailPrefix, mode), Account: &Account{Username: cmccTestUsername, Password: cmccTestPassword}}
++	}
++	serverAddress := net.DomainAddress("control.invalid")
++	if mode == 0 {
++		serverAddress = net.ParseAddress("127.0.0.1")
++	}
++	client := &Client{server: protocol.NewServerSpec(net.TCPDestination(serverAddress, serverPort), user), policyManager: cmccTestPolicy{}}
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{Target: net.UDPDestination(net.ParseAddress("192.0.2.9"), 53)}})
++	return client, &cmccTestDialer{tcpAddress: address}, ctx, cancel
++}
++
++func cmccTestStartUDPNode(t *testing.T, mode cmccProtocol, relayType byte) (gonet.Listener, *gonet.UDPConn, chan gonet.Conn, chan error) {
++	t.Helper()
++	listener, err := gonet.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	udp, err := gonet.ListenUDP("udp4", &gonet.UDPAddr{IP: gonet.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	accepted := make(chan gonet.Conn, 1)
++	done := make(chan error, 1)
++	var workers sync.WaitGroup
++	var control gonet.Conn
++	var mu sync.Mutex
++	t.Cleanup(func() {
++		_ = listener.Close()
++		_ = udp.Close()
++		mu.Lock()
++		if control != nil {
++			_ = control.Close()
++		}
++		mu.Unlock()
++		workers.Wait()
++	})
++	workers.Add(2)
++	go func() {
++		defer workers.Done()
++		conn, err := listener.Accept()
++		if err != nil {
++			done <- err
++			return
++		}
++		mu.Lock()
++		control = conn
++		mu.Unlock()
++		accepted <- conn
++		defer conn.Close()
++		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
++		read := func(n int) ([]byte, error) {
++			if mode != 0 {
++				return readCMCCBytes(conn, n)
++			}
++			b := make([]byte, n)
++			_, err := io.ReadFull(conn, b)
++			return b, err
++		}
++		greeting, err := read(3)
++		if err != nil || !bytes.Equal(greeting, []byte{5, 1, byte(mode)}) {
++			done <- fmt.Errorf("invalid node greeting: %v", err)
++			return
++		}
++		if mode == 0 {
++			_, err = conn.Write([]byte{5, 0})
++		} else {
++			challenge := []byte{0x7a}
++			response := []byte{5, 0x7a}
++			if mode == cmccProtocol82 {
++				challenge = []byte{1, 2, 3, 4}
++				response = append([]byte{5, 0x82}, challenge...)
++			}
++			_, err = conn.Write(response)
++			length := 1 + 1 + len(cmccTestUsername) + 1 + 32
++			if mode == cmccProtocol82 {
++				length += 21
++			}
++			auth, readErr := read(length)
++			want, _ := cmccAuthenticationRequest(mode, cmccTestUsername, cmccTestPassword, challenge)
++			if err != nil || readErr != nil || !bytes.Equal(auth, want) {
++				done <- fmt.Errorf("invalid node authentication")
++				return
++			}
++			_, err = conn.Write([]byte{1, 0})
++		}
++		if err != nil {
++			done <- err
++			return
++		}
++		command, err := read(10)
++		if err != nil || !bytes.Equal(command, []byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0}) {
++			done <- fmt.Errorf("invalid UDP associate endpoint: %v", err)
++			return
++		}
++		relay := []byte{1, 127, 0, 0, 1}
++		if relayType == 0 {
++			relay = []byte{1, 0, 0, 0, 0}
++		}
++		if relayType == 4 {
++			relay = append([]byte{4}, make([]byte, 16)...)
++		}
++		port := udp.LocalAddr().(*gonet.UDPAddr).Port
++		relay = append(relay, byte(port>>8), byte(port))
++		_, err = conn.Write(append([]byte{5, 0, 0}, relay...))
++		if err != nil {
++			done <- err
++			return
++		}
++		_, _ = io.Copy(io.Discard, conn)
++		done <- nil
++	}()
++	go func() {
++		defer workers.Done()
++		packet := make([]byte, 65536)
++		for {
++			n, from, err := udp.ReadFromUDP(packet)
++			if err != nil {
++				return
++			}
++			wire := packet[:n]
++			if mode != 0 {
++				for i := range wire {
++					wire[i] ^= 0xff
++				}
++			}
++			if len(wire) < 4 || !bytes.Equal(wire[:3], []byte{0, 0, 0}) {
++				continue
++			}
++			if _, _, _, err := cmccTestParseAddress(wire, 3); err != nil {
++				continue
++			}
++			if mode != 0 {
++				_, _ = udp.WriteToUDP([]byte{0, 0, 0, 1}, from)
++			}
++			_, _ = udp.WriteToUDP(wire, from)
++		}
++	}()
++	return listener, udp, accepted, done
++}
++
++func TestCMCCUDPClientCancellationClosesBlockedHandshake(t *testing.T) {
++	listener, err := gonet.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	ready := make(chan struct{})
++	serverDone := make(chan struct{})
++	go func() {
++		defer close(serverDone)
++		conn, err := listener.Accept()
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
++		_, _ = readCMCCBytes(conn, 3)
++		_, _ = conn.Write([]byte{5, 0x82})
++		close(ready)
++		_, _ = io.Copy(io.Discard, conn)
++	}()
++	client, dialer, ctx, cancel := cmccTestStartClient(t, cmccProtocol82, listener.Addr().String())
++	defer cancel()
++	up, _ := pipe.New()
++	_, down := pipe.New()
++	defer up.Interrupt()
++	defer down.Interrupt()
++	done := make(chan error, 1)
++	go func() { done <- client.Process(ctx, &transport.Link{Reader: up, Writer: down}, dialer) }()
++	select {
++	case <-ready:
++	case <-time.After(2 * time.Second):
++		t.Fatal("handshake did not begin")
++	}
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(2 * time.Second):
++		t.Fatal("owner cancellation left handshake blocked")
++	}
++	if !dialer.allClosed(1) {
++		t.Fatal("cancelled handshake leaked its control socket")
++	}
++	<-serverDone
++}
++
++func TestCMCCUDPClientCancellationClosesActiveAssociation(t *testing.T) {
++	for _, mode := range []cmccProtocol{cmccProtocol80, cmccProtocol82} {
++		t.Run(fmt.Sprintf("%x", mode), func(t *testing.T) {
++			listener, _, _, serverDone := cmccTestStartUDPNode(t, mode, 1)
++			client, dialer, ctx, cancel := cmccTestStartClient(t, mode, listener.Addr().String())
++			defer cancel()
++			up, input := pipe.New()
++			output, down := pipe.New()
++			defer up.Interrupt()
++			defer down.Interrupt()
++			done := make(chan error, 1)
++			go func() { done <- client.Process(ctx, &transport.Link{Reader: up, Writer: down}, dialer) }()
++			if err := input.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("active"))}); err != nil {
++				t.Fatal(err)
++			}
++			mb, err := output.ReadMultiBufferTimeout(2 * time.Second)
++			if err != nil {
++				t.Fatal(err)
++			}
++			buf.ReleaseMulti(mb)
++			cancel()
++			select {
++			case <-done:
++			case <-time.After(2 * time.Second):
++				t.Fatal("active association ignored owner cancellation")
++			}
++			if !dialer.allClosed(2) {
++				t.Fatal("cancellation leaked TCP or UDP")
++			}
++			if err := input.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("late"))}); err == nil {
++				t.Fatal("cancelled association still accepted uplink work")
++			}
++			if err := <-serverDone; err != nil {
++				t.Fatal(err)
++			}
++		})
++	}
++}
++
++func TestCMCCUDPClientCloseJoinsActiveAndPendingRequests(t *testing.T) {
++	for _, mode := range []cmccProtocol{cmccProtocol80, cmccProtocol82} {
++		t.Run(fmt.Sprintf("%x", mode), func(t *testing.T) {
++			listener, _, _, serverDone := cmccTestStartUDPNode(t, mode, 1)
++			client, dialer, ctx, cancel := cmccTestStartClient(t, mode, listener.Addr().String())
++			defer cancel()
++			up, input := pipe.New()
++			output, down := pipe.New()
++			defer up.Interrupt()
++			defer down.Interrupt()
++			active := make(chan error, 1)
++			go func() { active <- client.Process(ctx, &transport.Link{Reader: up, Writer: down}, dialer) }()
++			if err := input.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("active"))}); err != nil {
++				t.Fatal(err)
++			}
++			mb, err := output.ReadMultiBufferTimeout(2 * time.Second)
++			if err != nil {
++				t.Fatal(err)
++			}
++			buf.ReleaseMulti(mb)
++			pendingUp, _ := pipe.New()
++			_, pendingDown := pipe.New()
++			defer pendingUp.Interrupt()
++			defer pendingDown.Interrupt()
++			pending := make(chan error, 1)
++			// The mock accepts one TCP connection. This second request connects
++			// into its backlog and waits for a challenge with no caller cancel.
++			go func() {
++				pending <- client.Process(ctx, &transport.Link{Reader: pendingUp, Writer: pendingDown}, dialer)
++			}()
++			deadline := time.Now().Add(2 * time.Second)
++			for {
++				dialer.mu.Lock()
++				count := len(dialer.connections)
++				dialer.mu.Unlock()
++				if count == 3 {
++					break
++				}
++				if time.Now().After(deadline) {
++					t.Fatal("pending handshake did not connect")
++				}
++				time.Sleep(time.Millisecond)
++			}
++			closed := make(chan error, 1)
++			go func() { closed <- client.Close() }()
++			select {
++			case err := <-closed:
++				if err != nil {
++					t.Fatal(err)
++				}
++			case <-time.After(2 * time.Second):
++				t.Fatal("native outbound Close did not join its requests")
++			}
++			if !dialer.allClosed(3) {
++				t.Fatal("native Close returned with sockets still open")
++			}
++			for _, done := range []chan error{active, pending} {
++				select {
++				case <-done:
++				case <-time.After(time.Second):
++					t.Fatal("native Close left a request running")
++				}
++			}
++			if err := client.Close(); err != nil {
++				t.Fatal(err)
++			}
++			if err := client.Process(ctx, &transport.Link{Reader: up, Writer: down}, dialer); err == nil || !strings.Contains(err.Error(), "closed") {
++				t.Fatalf("closed outbound accepted new request: %v", err)
++			}
++			if err := <-serverDone; err != nil {
++				t.Fatal(err)
++			}
++		})
++	}
++}

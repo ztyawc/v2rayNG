@@ -14,6 +14,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CoreOutboundBuilderHttpTest {
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsInvalidHeadersRestoredFromJson() {
+        val profile = JsonUtil.fromJson("{\"configType\":\"HTTP\",\"server\":\"192.0.2.1\",\"serverPort\":\"443\",\"httpHeaders\":{\"X-Test\":\"te\\u0000st\"}}", ProfileItem::class.java)!!
+        CoreOutboundBuilder.toOutboundHttp(profile)
+    }
 
     @Test
     fun httpOutboundWritesCustomHeadersToSettings() {

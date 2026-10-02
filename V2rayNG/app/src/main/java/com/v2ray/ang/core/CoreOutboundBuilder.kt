@@ -10,6 +10,7 @@ import com.v2ray.ang.enums.NetworkType
 import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.extension.nullIfBlank
 import com.v2ray.ang.fmt.CmccSocksFmt
+import com.v2ray.ang.fmt.QyProxyFmt
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
@@ -29,6 +30,7 @@ object CoreOutboundBuilder {
             EConfigType.SHADOWSOCKS -> toOutboundShadowsocks(profileItem)
             EConfigType.SOCKS -> toOutboundSocks(profileItem)
             EConfigType.PRIVATE_SOCKS -> toOutboundPrivateSocks(profileItem)
+            EConfigType.QYPROXY -> toOutboundQyProxy(profileItem)
             EConfigType.VLESS -> toOutboundVless(profileItem)
             EConfigType.TROJAN -> toOutboundTrojan(profileItem)
             EConfigType.WIREGUARD -> toOutboundWireguard(profileItem)
@@ -50,6 +52,7 @@ object CoreOutboundBuilder {
             val protocol = outbound.protocol
             if (protocol.equals(EConfigType.SHADOWSOCKS.name, true)
                 || protocol.equals(EConfigType.SOCKS.name, true)
+                || protocol.equals(EConfigType.QYPROXY.name, true)
                 || protocol.equals(EConfigType.HTTP.name, true)
                 || protocol.equals(EConfigType.TROJAN.name, true)
                 || protocol.equals(EConfigType.WIREGUARD.name, true)
@@ -89,6 +92,7 @@ object CoreOutboundBuilder {
             EConfigType.SHADOWSOCKS,
             EConfigType.SOCKS,
             EConfigType.HTTP,
+            EConfigType.QYPROXY,
             EConfigType.TROJAN -> OutboundBean(
                 protocol = configType.name.lowercase(),
                 settings = OutboundBean.OutSettingsBean(),
@@ -247,6 +251,7 @@ object CoreOutboundBuilder {
     }
 
     internal fun toOutboundHttp(profileItem: ProfileItem): OutboundBean? {
+        require(com.v2ray.ang.util.HttpHeaderParser.isValid(profileItem.httpHeaders)) { "Invalid HTTP outbound headers" }
         val outboundBean = createInitOutbound(EConfigType.HTTP)
 
         outboundBean?.settings?.let { settings ->
@@ -263,6 +268,29 @@ object CoreOutboundBuilder {
         }
 
         return outboundBean
+    }
+
+    internal fun toOutboundQyProxy(profileItem: ProfileItem): OutboundBean? {
+        if (!QyProxyFmt.isValid(profileItem)) return null
+        val options = profileItem.qyProxy ?: return null
+        return createInitOutbound(EConfigType.QYPROXY)?.apply {
+            settings?.apply {
+                address = getServerAddress(profileItem, preferIPv6 = false)
+                port = profileItem.serverPort?.toIntOrNull()
+                user = profileItem.username
+                password = profileItem.password
+                role = options.role
+                sn = options.sn
+                gameId = options.gameId
+                serverId = options.serverId
+                clientType = options.clientType
+                gameArea = options.gameArea
+                zone = options.zone.ifEmpty { options.gameArea }
+                product = options.product
+                clientVersion = options.version
+                level = AppConfig.DEFAULT_LEVEL
+            }
+        }
     }
 
     private fun toOutboundWireguard(profileItem: ProfileItem): OutboundBean? {
@@ -691,7 +719,7 @@ object CoreOutboundBuilder {
         return true
     }
 
-    private fun getServerAddress(profileItem: ProfileItem): String {
+    private fun getServerAddress(profileItem: ProfileItem, preferIPv6: Boolean? = null): String {
         if (Utils.isPureIpAddress(profileItem.server.orEmpty())) {
             return profileItem.server.orEmpty()
         }
@@ -701,7 +729,7 @@ object CoreOutboundBuilder {
             return domain
         }
         //Resolve and replace domain
-        val resolvedIps = HttpUtil.resolveHostToIP(domain, MmkvManager.decodeSettingsBool(AppConfig.PREF_PREFER_IPV6))
+        val resolvedIps = HttpUtil.resolveHostToIP(domain, preferIPv6 ?: MmkvManager.decodeSettingsBool(AppConfig.PREF_PREFER_IPV6))
         if (resolvedIps.isNullOrEmpty()) {
             return domain
         }

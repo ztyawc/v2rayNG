@@ -1,0 +1,3 @@
+# Unified diff context markers precede Go tabs and otherwise empty lines.
+patches/xray-core-cmcc-udp.patch whitespace=-blank-at-eol,-space-before-tab
+patches/xray-core-qyproxy-cn2.patch whitespace=-blank-at-eol,-space-before-tab

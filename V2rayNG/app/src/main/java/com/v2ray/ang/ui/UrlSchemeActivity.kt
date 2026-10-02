@@ -74,7 +74,7 @@ class UrlSchemeActivity : BaseComponentActivity() {
             if (uri.fragment.isNullOrEmpty() && !fragment.isNullOrEmpty()) {
                 decodedUrl += "#${fragment}"
             }
-            LogUtil.i(AppConfig.TAG, decodedUrl)
+            LogUtil.i(AppConfig.TAG, "Import URL scheme received")
             lifecycleScope.launch(Dispatchers.IO) {
                 val (count, countSub) = AngConfigManager.importBatchConfig(decodedUrl, "", false)
                 withContext(Dispatchers.Main) {

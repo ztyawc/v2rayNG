@@ -51,14 +51,7 @@ class TProxyService(
             writeText(configContent)
         }
 //        LogUtil.i(AppConfig.TAG, "Config file created: ${configFile.absolutePath}")
-        LogUtil.d(AppConfig.TAG, "HevSocks5Tunnel Config content:\n$configContent")
-
-        try {
-//            LogUtil.i(AppConfig.TAG, "TProxyStartService...")
-            TProxyStartService(configFile.absolutePath, vpnInterface.fd)
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "HevSocks5Tunnel exception: ${e.message}")
-        }
+        check(TProxyStartService(configFile.absolutePath, vpnInterface.fd)) { "VPN tunnel setup failed" }
     }
 
     private fun buildConfig(): String {
@@ -105,11 +98,6 @@ class TProxyService(
      * Stops the tun2socks process
      */
     override fun stopTun2Socks() {
-        try {
-            LogUtil.i(AppConfig.TAG, "TProxyStopService...")
-            TProxyStopService()
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to stop hev-socks5-tunnel", e)
-        }
+        check(TProxyStopService()) { "VPN tunnel cleanup failed" }
     }
 }

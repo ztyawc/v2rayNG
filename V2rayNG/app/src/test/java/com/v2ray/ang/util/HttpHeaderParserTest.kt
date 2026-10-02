@@ -6,6 +6,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HttpHeaderParserTest {
+    @Test fun rejectsEveryControlExceptHorizontalTabInEditorAndStoredHeaders() {
+        ((0..31) + 127).filter { it != 9 && it != 10 }.forEach { code ->
+            assertFalse("Control $code", HttpHeaderParser.parse("X-Test: a${code.toChar()}b").isSuccess)
+            assertFalse("Stored control $code", HttpHeaderParser.isValid(mapOf("X-Test" to "a${code.toChar()}b")))
+        }
+        assertFalse(HttpHeaderParser.isValid(mapOf("X-Test" to "a\nb")))
+        assertTrue(HttpHeaderParser.parse("X-Test: a\tb").isSuccess)
+        assertTrue(HttpHeaderParser.isValid(mapOf("X-Test" to "a\tb")))
+        assertFalse(HttpHeaderParser.isValid(mapOf("X-Test" to "a", "x-test" to "b")))
+    }
 
     @Test
     fun parsesExampleHeadersAndPreservesValueColons() {

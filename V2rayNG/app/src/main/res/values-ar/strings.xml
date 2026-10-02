@@ -563,4 +563,18 @@
     <string name="connection_test_empty_message">لا تتوفر تفاصيل</string>
     <string name="value_unknown">غير معروف</string>
 
+    <string name="server_qyproxy">CN2 / تنزيل CN2</string>
+    <string name="menu_item_import_config_manually_qyproxy">إدخال يدوي [CN2 / تنزيل CN2]</string>
+    <string name="qyproxy_cn2">CN2</string>
+    <string name="qyproxy_cn2_download">تنزيل CN2</string>
+    <string name="qyproxy_sn">SN الجهاز</string>
+    <string name="qyproxy_game_id">معرّف اللعبة</string>
+    <string name="qyproxy_server_id">معرّف الخادم</string>
+    <string name="qyproxy_game_area">منطقة اللعبة</string>
+    <string name="qyproxy_zone">النطاق</string>
+    <string name="qyproxy_client_type">نوع العميل</string>
+    <string name="qyproxy_product">منتج العميل</string>
+    <string name="qyproxy_version">إصدار العميل</string>
+    <string name="qyproxy_credentials_hint">أدخل اسم مستخدم العقدة الأصلي وسر CN2 المخصص ومنفذ التحكم الفعلي وSN الجهاز ومعرّفي اللعبة والخادم.</string>
+    <string name="qyproxy_invalid_config">تحقق من الحقول المطلوبة وIPv4 أو اسم العقدة والمنفذ (1–65535) والمعرّفات (1–4294967295).</string>
 </resources>

@@ -24,6 +24,14 @@ object ZipUtil {
         maxCompressionRatio = 1000.0,
     )
 
+    /** Clean only expired ZIP attachments inside the caller-owned archive directory. */
+    fun removeExpiredArchives(directory: File, olderThanMillis: Long) {
+        directory.listFiles()?.filter { it.isFile && it.extension == "zip" && it.lastModified() < olderThanMillis }
+            ?.forEach { file ->
+                if (!file.delete()) throw IOException("Unable to remove expired backup archive")
+            }
+    }
+
     internal class ExtractionLimits(
         val maxArchiveBytes: Long,
         val maxEntries: Int,
@@ -50,8 +58,6 @@ object ZipUtil {
      */
     @Throws(IOException::class)
     fun zipFromFolder(folderPath: String, outputZipFilePath: String): Boolean {
-        val buffer = ByteArray(BUFFER_SIZE)
-
         try {
             if (folderPath.isEmpty() || outputZipFilePath.isEmpty()) {
                 return false
@@ -70,23 +76,13 @@ object ZipUtil {
                 return false
             }
 
-            val zos = ZipOutputStream(FileOutputStream(outputZipFilePath))
-
-            filesToCompress.forEach { file ->
-                val ze = ZipEntry(File(file).name)
-                zos.putNextEntry(ze)
-                val inputStream = FileInputStream(file)
-                while (true) {
-                    val len = inputStream.read(buffer)
-                    if (len <= 0) break
-                    zos.write(buffer, 0, len)
+            ZipOutputStream(FileOutputStream(outputZipFilePath)).use { zos ->
+                filesToCompress.forEach { file ->
+                    zos.putNextEntry(ZipEntry(File(file).name))
+                    FileInputStream(file).use { input -> input.copyTo(zos, BUFFER_SIZE) }
+                    zos.closeEntry()
                 }
-
-                inputStream.close()
             }
-
-            zos.closeEntry()
-            zos.close()
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to zip folder", e)
             return false

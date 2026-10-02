@@ -20,6 +20,11 @@ import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 
 object LauncherManager {
+    internal const val RESTART_GENERATION = "restartGeneration"
+
+    internal fun restartFromDaemon(context: Context, generation: Long) {
+        startContextService(context, generation)
+    }
 
     fun startServiceFromToggle(context: Context): Boolean {
         if (MmkvManager.getSelectServer().isNullOrEmpty()) {
@@ -29,7 +34,7 @@ object LauncherManager {
         try {
             startContextService(context)
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "LauncherManager: ${e.message}", e)
+            LogUtil.e(AppConfig.TAG, "Service launch validation failed", e)
             context.toast(e.message ?: e.javaClass.simpleName)
             return false
         }
@@ -46,7 +51,7 @@ object LauncherManager {
         try {
             startContextService(context)
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "LauncherManager: ${e.message}", e)
+            LogUtil.e(AppConfig.TAG, "Service launch validation failed", e)
             context.toast(e.message ?: e.javaClass.simpleName)
         }
     }
@@ -69,7 +74,7 @@ object LauncherManager {
     }
 
     @Throws(Exception::class)
-    private fun startContextService(context: Context) {
+    private fun startContextService(context: Context, restartGeneration: Long? = null) {
         // Note: isRunning check is removed here to avoid loading Native libraries in the UI process.
         // The check is performed in CoreServiceManager when the service starts in the daemon process.
 
@@ -93,8 +98,6 @@ object LauncherManager {
             error(context.getString(R.string.toast_config_file_invalid))
         }
 
-        SettingsManager.refreshRuntimeSocksPort()
-
         if (config.insecure == true && config.pinnedCA256.isNullOrEmpty()) {
             context.toastError(R.string.toast_allow_insecure_deprecated)
             Utils.setClipboard(context, context.getString(R.string.toast_allow_insecure_deprecated))
@@ -107,11 +110,6 @@ object LauncherManager {
         }
 
         val isRootMode = SettingsManager.isRootMode()
-        if (isRootMode && !RootManager.isRootAvailable()) {
-            LogUtil.e(AppConfig.TAG, "LauncherManager: root mode requires root but none available")
-            error(context.getString(R.string.toast_root_required))
-        }
-
         val intent = if (isRootMode) {
             LogUtil.i(AppConfig.TAG, "LauncherManager: Starting Root service")
             Intent(context.applicationContext, CoreRootService::class.java)
@@ -123,6 +121,7 @@ object LauncherManager {
             Intent(context.applicationContext, CoreProxyOnlyService::class.java)
         }
 
+        restartGeneration?.let { intent.putExtra(RESTART_GENERATION, it) }
         try {
             ContextCompat.startForegroundService(context, intent)
         } catch (e: SecurityException) {

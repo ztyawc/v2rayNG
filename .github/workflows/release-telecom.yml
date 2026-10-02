@@ -76,9 +76,7 @@ jobs:
         set -euo pipefail
         echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --channel=0 --install "ndk;29.0.14206865"
         echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
-        sed -i '10i\
-        \
-            ndkVersion = "29.0.14206865"' "$GITHUB_WORKSPACE/V2rayNG/app/build.gradle.kts"
+
 
     - name: Setup Go
       uses: actions/setup-go@v6
@@ -90,7 +88,9 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        go install golang.org/x/mobile/cmd/gomobile@latest
+        mobile_version=$(cd AndroidLibXrayLite && go list -m -f '{{.Version}}' golang.org/x/mobile)
+        go install "golang.org/x/mobile/cmd/gomobile@$mobile_version"
+        go install "golang.org/x/mobile/cmd/gobind@$mobile_version"
         echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
     - name: Restore cached libhevtun
@@ -118,7 +118,7 @@ jobs:
 
     - name: Build patched libv2ray
       shell: bash
-      run: bash AndroidLibXrayLite/scripts/build-libv2ray-arm64.sh
+      run: bash build-libv2ray.sh
 
     - name: Setup Java
       uses: actions/setup-java@v5
@@ -126,15 +126,21 @@ jobs:
         distribution: temurin
         java-version: '21'
 
-    - name: Run Telecom update-checker unit tests
+    - name: Run all unit tests
       shell: bash
       run: |
         set -euo pipefail
         cd "$GITHUB_WORKSPACE/V2rayNG"
         echo "sdk.dir=${ANDROID_HOME}" > local.properties
         chmod 755 gradlew
-        ./gradlew testTelecomDebugUnitTest -PABI_FILTERS=arm64-v8a \
-          --tests com.v2ray.ang.handler.UpdateCheckerManagerTest
+        ./gradlew :app:testPlaystoreDebugUnitTest :app:testFdroidDebugUnitTest :app:testTelecomDebugUnitTest
+
+    - name: Check debug native packaging
+      shell: bash
+      run: |
+        cd "$GITHUB_WORKSPACE/V2rayNG"
+        ./gradlew :app:assembleTelecomDebug -PABI_FILTERS=arm64-v8a
+        python3 ../scripts/check_native_packaging.py app/build/outputs/apk/telecom/debug --abis arm64-v8a
 
     - name: Decode Telecom signing key
       id: android_keystore
@@ -189,6 +195,7 @@ jobs:
         TELECOM_CERT_SHA256: ${{ secrets.TELECOM_CERT_SHA256 }}
       run: |
         set -euo pipefail
+        python3 "$GITHUB_WORKSPACE/scripts/check_native_packaging.py" "$GITHUB_WORKSPACE/V2rayNG/app/build/outputs/apk/telecom/release" --abis arm64-v8a
         apk="$(find "$GITHUB_WORKSPACE/V2rayNG/app/build/outputs/apk/telecom/release" -type f -name 'v2rayNG_telecom_*_arm64-v8a.apk' -print -quit)"
         test -n "$apk"
 

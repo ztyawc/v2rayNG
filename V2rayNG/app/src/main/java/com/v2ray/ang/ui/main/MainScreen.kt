@@ -52,8 +52,8 @@ fun MainScreen(
     val isDarkTheme = LocalDarkTheme.current
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var showSearch by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
+    val showSearch = uiState.searchVisible
+    val searchQuery = uiState.searchQuery
     var showDelAllConfirm by remember { mutableStateOf(false) }
     var showDelDuplicateConfirm by remember { mutableStateOf(false) }
     var showDelInvalidConfirm by remember { mutableStateOf(false) }
@@ -150,15 +150,12 @@ fun MainScreen(
                     showSearch = showSearch,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { query: String ->
-                        searchQuery = query
                         onAction(MainAction.Search(query))
                     },
                     onSearchClose = {
-                        searchQuery = ""
-                        onAction(MainAction.Search(""))
-                        showSearch = false
+                        onAction(MainAction.ShowSearch(false))
                     },
-                    onSearchToggle = { show: Boolean -> showSearch = show },
+                    onSearchToggle = { show: Boolean -> onAction(MainAction.ShowSearch(show)) },
                     onMenuClick = { scope.launch { drawerState.open() } },
                     onAction = onAction,
                     onMoreMenuAction = { action ->

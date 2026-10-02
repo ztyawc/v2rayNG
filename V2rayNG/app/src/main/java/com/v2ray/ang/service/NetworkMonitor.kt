@@ -9,9 +9,9 @@ import com.v2ray.ang.extension.delay
 import com.v2ray.ang.util.LogUtil
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
 
 /**
  * Watches the network that carries the tunnel and reports topology changes.
@@ -26,12 +26,16 @@ import kotlinx.coroutines.launch
 class NetworkMonitor(
     private val connectivity: ConnectivityManager,
     private val onUnderlyingNetworksChanged: (Array<Network>?) -> Unit,
-    private val onHandover: () -> Unit,
+    private val scope: CoroutineScope,
+    private val onHandover: (NetworkMonitor) -> Unit,
+    private val component: String,
+    private val profileGuid: String?,
 ) {
     private companion object {
         const val HANDOVER_DEBOUNCE_MS = 1000L
     }
 
+    private val callbackLock = Any()
     private var upstream: Network? = null
     private var handoverJob: Job? = null
     private var registered = false
@@ -54,7 +58,8 @@ class NetworkMonitor(
     }
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
+        override fun onAvailable(network: Network) = synchronized(callbackLock) {
+            if (!registered) return@synchronized
             val previous = upstream
             upstream = network
             onUnderlyingNetworksChanged(arrayOf(network))
@@ -63,12 +68,15 @@ class NetworkMonitor(
             }
         }
 
-        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) = synchronized(callbackLock) {
+            if (!registered || network != upstream) return@synchronized
             // it's a good idea to refresh capabilities
             onUnderlyingNetworksChanged(arrayOf(network))
         }
 
-        override fun onLost(network: Network) {
+        override fun onLost(network: Network) = synchronized(callbackLock) {
+            if (!registered || network != upstream) return@synchronized
+            upstream = null
             onUnderlyingNetworksChanged(null)
         }
     }
@@ -76,43 +84,49 @@ class NetworkMonitor(
     /**
      * Starts watching. Safe to call more than once, only the first call registers.
      */
-    fun register() {
-        if (registered) return
+    fun register() = synchronized(callbackLock) {
+        if (registered) return@synchronized
+        registered = true
         try {
             connectivity.requestNetwork(request, callback)
-            registered = true
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "NetworkMonitor: Failed to request network", e)
+            registered = false
+            LogUtil.e(AppConfig.TAG, "Service mode=$component phase=monitor guid=$profileGuid register failed", e)
         }
     }
 
     /**
      * Stops watching and drops the tracked state. Safe to call more than once.
      */
-    fun unregister() {
+    fun isRegistered(): Boolean = synchronized(callbackLock) { registered }
+
+    fun unregister() = synchronized(callbackLock) {
         handoverJob?.cancel()
         handoverJob = null
         upstream = null
-        if (!registered) return
+        if (!registered) return@synchronized
         registered = false
         try {
             connectivity.unregisterNetworkCallback(callback)
         } catch (e: Exception) {
-            LogUtil.w(AppConfig.TAG, "NetworkMonitor: Failed to unregister callback", e)
+            LogUtil.w(AppConfig.TAG, "Service mode=$component phase=monitor guid=$profileGuid unregister failed", e)
         }
     }
 
     private fun scheduleHandover(network: Network) {
         LogUtil.i(AppConfig.TAG, "NetworkMonitor: Upstream is now $network")
         handoverJob?.cancel()
-        handoverJob = CoroutineScope(Dispatchers.IO).launch {
+        handoverJob = scope.launch {
             try {
                 delay(HANDOVER_DEBOUNCE_MS)
-                onHandover()
+                synchronized(callbackLock) {
+                    ensureActive()
+                    if (registered && upstream == network) onHandover(this@NetworkMonitor)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "NetworkMonitor: Failed to handle upstream change", e)
+                LogUtil.e(AppConfig.TAG, "Service mode=$component phase=handover guid=$profileGuid callback failed", e)
             }
         }
     }
