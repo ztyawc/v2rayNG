@@ -21,11 +21,15 @@ class TProxyService(
     companion object {
         @JvmStatic
         @Suppress("FunctionName")
-        private external fun TProxyStartService(configPath: String, fd: Int)
+        private external fun TProxyStartService(configPath: String, fd: Int): Boolean
 
         @JvmStatic
         @Suppress("FunctionName")
-        private external fun TProxyStopService()
+        private external fun TProxyStopService(): Boolean
+
+        @JvmStatic
+        @Suppress("FunctionName")
+        private external fun TProxyIsRunning(): Boolean
 
         @JvmStatic
         @Suppress("FunctionName")
@@ -47,14 +51,7 @@ class TProxyService(
             writeText(configContent)
         }
 //        LogUtil.i(AppConfig.TAG, "Config file created: ${configFile.absolutePath}")
-        LogUtil.d(AppConfig.TAG, "HevSocks5Tunnel Config content:\n$configContent")
-
-        try {
-//            LogUtil.i(AppConfig.TAG, "TProxyStartService...")
-            TProxyStartService(configFile.absolutePath, vpnInterface.fd)
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "HevSocks5Tunnel exception: ${e.message}")
-        }
+        check(TProxyStartService(configFile.absolutePath, vpnInterface.fd)) { "VPN tunnel setup failed" }
     }
 
     private fun buildConfig(): String {
@@ -93,7 +90,7 @@ class TProxyService(
             appendLine("misc:")
             appendLine("  tcp-read-write-timeout: ${tcpTimeout * 1000}")
             appendLine("  udp-read-write-timeout: ${udpTimeout * 1000}")
-            appendLine("  log-level: ${MmkvManager.decodeSettingsString(AppConfig.PREF_HEV_TUNNEL_LOGLEVEL) ?: "warn"}")
+            appendLine("  log-level: ${MmkvManager.decodeSettingsString(AppConfig.PREF_HEV_TUNNEL_LOGLEVEL, AppConfig.DEFAULT_HEV_TUNNEL_LOGLEVEL)}")
         }
     }
 
@@ -101,11 +98,6 @@ class TProxyService(
      * Stops the tun2socks process
      */
     override fun stopTun2Socks() {
-        try {
-            LogUtil.i(AppConfig.TAG, "TProxyStopService...")
-            TProxyStopService()
-        } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to stop hev-socks5-tunnel", e)
-        }
+        check(TProxyStopService()) { "VPN tunnel cleanup failed" }
     }
 }

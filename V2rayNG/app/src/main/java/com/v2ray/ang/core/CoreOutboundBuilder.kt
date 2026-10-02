@@ -9,6 +9,8 @@ import com.v2ray.ang.enums.EConfigType
 import com.v2ray.ang.enums.NetworkType
 import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.extension.nullIfBlank
+import com.v2ray.ang.fmt.CmccSocksFmt
+import com.v2ray.ang.fmt.QyProxyFmt
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
@@ -27,6 +29,8 @@ object CoreOutboundBuilder {
             EConfigType.VMESS -> toOutboundVmess(profileItem)
             EConfigType.SHADOWSOCKS -> toOutboundShadowsocks(profileItem)
             EConfigType.SOCKS -> toOutboundSocks(profileItem)
+            EConfigType.PRIVATE_SOCKS -> toOutboundPrivateSocks(profileItem)
+            EConfigType.QYPROXY -> toOutboundQyProxy(profileItem)
             EConfigType.VLESS -> toOutboundVless(profileItem)
             EConfigType.TROJAN -> toOutboundTrojan(profileItem)
             EConfigType.WIREGUARD -> toOutboundWireguard(profileItem)
@@ -48,6 +52,7 @@ object CoreOutboundBuilder {
             val protocol = outbound.protocol
             if (protocol.equals(EConfigType.SHADOWSOCKS.name, true)
                 || protocol.equals(EConfigType.SOCKS.name, true)
+                || protocol.equals(EConfigType.QYPROXY.name, true)
                 || protocol.equals(EConfigType.HTTP.name, true)
                 || protocol.equals(EConfigType.TROJAN.name, true)
                 || protocol.equals(EConfigType.WIREGUARD.name, true)
@@ -62,7 +67,7 @@ object CoreOutboundBuilder {
             if (muxEnabled) {
                 outbound.mux?.enabled = true
                 outbound.mux?.concurrency = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_CONCURRENCY, "8").orEmpty().toInt()
-                outbound.mux?.xudpConcurrency = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_XUDP_CONCURRENCY, "16").orEmpty().toInt()
+                outbound.mux?.xudpConcurrency = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_XUDP_CONCURRENCY, AppConfig.DEFAULT_MUX_XUDP_CONCURRENCY).orEmpty().toInt()
                 outbound.mux?.xudpProxyUDP443 = MmkvManager.decodeSettingsString(AppConfig.PREF_MUX_XUDP_QUIC, "reject")
                 if (protocol.equals(EConfigType.VLESS.name, true) && outbound.settings?.flow?.isNotEmpty() == true) {
                     outbound.mux?.concurrency = -1
@@ -87,11 +92,16 @@ object CoreOutboundBuilder {
             EConfigType.SHADOWSOCKS,
             EConfigType.SOCKS,
             EConfigType.HTTP,
+            EConfigType.QYPROXY,
             EConfigType.TROJAN -> OutboundBean(
                 protocol = configType.name.lowercase(),
                 settings = OutboundBean.OutSettingsBean(),
                 streamSettings = OutboundBean.StreamSettingsBean()
             )
+
+            // Private SOCKS uses the stock Xray SOCKS outbound. The user-level cmccProtocol
+            // extension selects the private handshake in the patched core.
+            EConfigType.PRIVATE_SOCKS -> createInitOutbound(EConfigType.SOCKS)
 
             EConfigType.WIREGUARD -> OutboundBean(
                 protocol = configType.name.lowercase(),
@@ -219,13 +229,38 @@ object CoreOutboundBuilder {
         return outboundBean
     }
 
-    private fun toOutboundHttp(profileItem: ProfileItem): OutboundBean? {
+    /** Builds a stock SOCKS outbound with the private CMCC authentication marker. */
+    internal fun toOutboundPrivateSocks(profileItem: ProfileItem): OutboundBean? {
+        val cmccProtocol = CmccSocksFmt.normalizeCmccProtocol(profileItem.cmccProtocol) ?: return null
+        val username = profileItem.username?.takeIf { it.isNotBlank() } ?: return null
+        val password = profileItem.password?.takeIf { it.isNotBlank() } ?: return null
+        val port = profileItem.serverPort?.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+        val address = getServerAddress(profileItem).takeIf { it.isNotBlank() } ?: return null
+        val outboundBean = createInitOutbound(EConfigType.SOCKS)
+
+        outboundBean?.settings?.let { settings ->
+            settings.address = address
+            settings.port = port
+            settings.level = AppConfig.DEFAULT_LEVEL
+            settings.user = username
+            settings.pass = password
+            settings.cmccProtocol = cmccProtocol
+        }
+
+        return outboundBean
+    }
+
+    internal fun toOutboundHttp(profileItem: ProfileItem): OutboundBean? {
+        require(com.v2ray.ang.util.HttpHeaderParser.isValid(profileItem.httpHeaders)) { "Invalid HTTP outbound headers" }
         val outboundBean = createInitOutbound(EConfigType.HTTP)
 
         outboundBean?.settings?.let { settings ->
             settings.address = getServerAddress(profileItem)
             settings.port = profileItem.serverPort.orEmpty().toInt()
             settings.level = AppConfig.DEFAULT_LEVEL
+            settings.headers = profileItem.httpHeaders
+                ?.takeIf { it.isNotEmpty() }
+                ?.let(::LinkedHashMap)
             if (profileItem.username.isNotNullEmpty()) {
                 settings.user = profileItem.username.orEmpty()
                 settings.pass = profileItem.password.orEmpty()
@@ -233,6 +268,29 @@ object CoreOutboundBuilder {
         }
 
         return outboundBean
+    }
+
+    internal fun toOutboundQyProxy(profileItem: ProfileItem): OutboundBean? {
+        if (!QyProxyFmt.isValid(profileItem)) return null
+        val options = profileItem.qyProxy ?: return null
+        return createInitOutbound(EConfigType.QYPROXY)?.apply {
+            settings?.apply {
+                address = getServerAddress(profileItem, preferIPv6 = false)
+                port = profileItem.serverPort?.toIntOrNull()
+                user = profileItem.username
+                password = profileItem.password
+                role = options.role
+                sn = options.sn
+                gameId = options.gameId
+                serverId = options.serverId
+                clientType = options.clientType
+                gameArea = options.gameArea
+                zone = options.zone.ifEmpty { options.gameArea }
+                product = options.product
+                clientVersion = options.version
+                level = AppConfig.DEFAULT_LEVEL
+            }
+        }
     }
 
     private fun toOutboundWireguard(profileItem: ProfileItem): OutboundBean? {
@@ -264,6 +322,13 @@ object CoreOutboundBuilder {
             wireguard.reserved = profileItem.reserved?.takeIf { it.isNotBlank() }?.split(",")?.filter { it.isNotBlank() }?.map { it.trim().toInt() }
         }
 
+        if (!profileItem.finalMask.isNullOrBlank()) {
+            outboundBean?.streamSettings = OutboundBean.StreamSettingsBean()
+            outboundBean?.streamSettings?.let {
+                updateOutboundFinalMask(it, profileItem)
+                it.network = null
+            }
+        }
         return outboundBean
     }
 
@@ -389,6 +454,7 @@ object CoreOutboundBuilder {
                         )
                     )
                 }
+                udpMaskList.reverse()
                 streamSettings.finalmask = OutboundBean.StreamSettingsBean.FinalMaskBean(
                     udp = udpMaskList.toList()
                 )
@@ -628,8 +694,7 @@ object CoreOutboundBuilder {
                 JsonUtil.parseString(JsonUtil.toJson(existingFinalMask))
             } ?: JsonObject()
 
-            // finalmask.tcp / finalmask.udp are arrays; prepend mask at index 0.
-            fun prependMask(scope: String, mask: OutboundBean.StreamSettingsBean.FinalMaskBean.MaskBean) {
+            fun appendMask(scope: String, mask: OutboundBean.StreamSettingsBean.FinalMaskBean.MaskBean) {
                 val current = finalMaskObj.get(scope)
                 if (current != null && current.isJsonArray && current.asJsonArray.size() > 0) {
                     return
@@ -644,8 +709,8 @@ object CoreOutboundBuilder {
                 finalMaskObj.add(scope, newArray)
             }
 
-            prependMask("tcp", fragmentMask)
-            prependMask("udp", noiseMask)
+            appendMask("tcp", fragmentMask)
+            appendMask("udp", noiseMask)
             streamSettings.finalmask = finalMaskObj
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to update outbound fragment", e)
@@ -654,20 +719,32 @@ object CoreOutboundBuilder {
         return true
     }
 
-    private fun getServerAddress(profileItem: ProfileItem): String {
+    private fun getServerAddress(profileItem: ProfileItem, preferIPv6: Boolean? = null): String {
         if (Utils.isPureIpAddress(profileItem.server.orEmpty())) {
             return profileItem.server.orEmpty()
         }
 
         val domain = HttpUtil.toIdnDomain(profileItem.server.orEmpty())
-        if (MmkvManager.decodeSettingsString(AppConfig.PREF_OUTBOUND_DOMAIN_RESOLVE_METHOD, "1") != "2") {
+        if (MmkvManager.decodeSettingsString(AppConfig.PREF_OUTBOUND_DOMAIN_RESOLVE_METHOD, AppConfig.DEFAULT_OUTBOUND_DOMAIN_RESOLVE_METHOD) != "2") {
             return domain
         }
         //Resolve and replace domain
-        val resolvedIps = HttpUtil.resolveHostToIP(domain, MmkvManager.decodeSettingsBool(AppConfig.PREF_PREFER_IPV6))
+        val resolvedIps = HttpUtil.resolveHostToIP(domain, preferIPv6 ?: MmkvManager.decodeSettingsBool(AppConfig.PREF_PREFER_IPV6))
         if (resolvedIps.isNullOrEmpty()) {
             return domain
         }
         return resolvedIps.first()
+    }
+
+    fun updateOutboundFinalMask(streamSettings: OutboundBean.StreamSettingsBean, profileItem: ProfileItem) {
+        val finalMask = profileItem.finalMask
+        finalMask?.let {
+            val parsedFinalMask = JsonUtil.parseString(profileItem.finalMask)
+            if (parsedFinalMask != null) {
+                streamSettings.finalmask = parsedFinalMask
+            } else {
+                LogUtil.w("V2rayConfigManager", "Invalid finalMask JSON, keeping previously generated finalmask")
+            }
+        }
     }
 }
