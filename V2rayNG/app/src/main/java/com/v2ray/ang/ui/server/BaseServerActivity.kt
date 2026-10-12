@@ -404,13 +404,6 @@ abstract class BaseServerActivity : BaseComponentActivity() {
             }
         }
 
-        if (
-            config.configType == EConfigType.TROJAN &&
-            config.security.isNullOrBlank()
-        ) {
-            toast(R.string.server_lab_stream_security)
-            return false
-        }
         if (!config.xhttpExtra.isNullOrBlank() && JsonUtil.parseString(config.xhttpExtra) == null) {
             toast(R.string.server_lab_xhttp_extra)
             return false

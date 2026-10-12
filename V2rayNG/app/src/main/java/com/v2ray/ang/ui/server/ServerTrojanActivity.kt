@@ -47,10 +47,6 @@ class ServerTrojanActivity : BaseServerActivity() {
             toast(R.string.server_lab_id3)
             return false
         }
-        if (config.security.isNullOrBlank()) {
-            toast(R.string.server_lab_stream_security)
-            return false
-        }
         return true
     }
 

@@ -5,6 +5,7 @@ readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly XRAY_DIR="$REPO_DIR/AndroidLibXrayLite/.build/xray-core"
 readonly CMCC_UDP_PATCH="$REPO_DIR/patches/xray-core-cmcc-udp.patch"
 readonly QYPROXY_PATCH="$REPO_DIR/patches/xray-core-qyproxy-cn2.patch"
+readonly PLAINTEXT_PATCH="$REPO_DIR/patches/xray-core-plaintext-vless-trojan.patch"
 # The submodule owns the pinned source checkout, patches, assets and native tests.
 OUTPUT_AAR="$REPO_DIR/AndroidLibXrayLite/.build/libv2ray-base-arm64.aar" \
     bash "$REPO_DIR/AndroidLibXrayLite/scripts/build-libv2ray-arm64.sh"
@@ -14,11 +15,14 @@ git -C "$XRAY_DIR" apply --check "$CMCC_UDP_PATCH"
 git -C "$XRAY_DIR" apply "$CMCC_UDP_PATCH"
 git -C "$XRAY_DIR" apply --check "$QYPROXY_PATCH"
 git -C "$XRAY_DIR" apply "$QYPROXY_PATCH"
+git -C "$XRAY_DIR" apply --check "$PLAINTEXT_PATCH"
+git -C "$XRAY_DIR" apply "$PLAINTEXT_PATCH"
 (
     cd "$XRAY_DIR"
     GOWORK=off go test -race ./proxy/socks ./proxy/qyproxy/...
+    GOWORK=off go test -race ./infra/conf -run '^TestPlaintextVlessTrojan'
     GOWORK=off go test ./proxy/http ./proxy/socks ./proxy/qyproxy/...
-    GOWORK=off go test ./infra/conf -run '^(TestSocks|TestQyProxy)'
+    GOWORK=off go test ./infra/conf -run '^(TestSocks|TestQyProxy|TestVLess|TestTrojan|TestPlaintextVlessTrojan)'
 )
 # The requested phone build targets ARM64. Reuse the tested staging module.
 (
