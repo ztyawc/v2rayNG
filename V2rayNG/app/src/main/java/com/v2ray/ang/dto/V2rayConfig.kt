@@ -81,6 +81,17 @@ data class V2rayConfig(
             var user: String? = null,
             var pass: String? = null,
             var headers: Map<String, String>? = null,
+            var cmccProtocol: String? = null,
+            /*QyProxy CN2*/
+            var role: String? = null,
+            var sn: String? = null,
+            var gameId: Long? = null,
+            var serverId: Long? = null,
+            var clientType: Long? = null,
+            var gameArea: String? = null,
+            var zone: String? = null,
+            var product: String? = null,
+            var clientVersion: String? = null,
             /*VMess/VLESS*/
             var id: String? = null,
             var security: String? = null,
@@ -108,7 +119,7 @@ data class V2rayConfig(
         }
 
         data class StreamSettingsBean(
-            var network: String = AppConfig.DEFAULT_NETWORK,
+            var network: String? = AppConfig.DEFAULT_NETWORK,
             var security: String? = null,
             var tcpSettings: TcpSettingsBean? = null,
             var kcpSettings: KcpSettingsBean? = null,
@@ -437,6 +448,7 @@ data class V2rayConfig(
         data class PingConfigObject(
             val destination: String,
             val connectivity: String? = null,
+            val httpMethod: String? = null,
             val interval: String,
             val sampling: Int,
             val timeout: String? = null
