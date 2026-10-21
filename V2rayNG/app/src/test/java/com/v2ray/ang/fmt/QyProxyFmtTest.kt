@@ -18,8 +18,8 @@ class QyProxyFmtTest {
         qyProxy = QyProxyOptions(role, "device+%", 19535, 21254, gameArea = "hk", zone = "zone+%")
     }
 
-    @Test fun bothRolesRoundTripAllNegotiationFieldsAndSpecialCharacters() {
-        for (role in listOf(QyProxyFmt.CN2, QyProxyFmt.CN2_DOWNLOAD)) {
+    @Test fun allThreeRolesRoundTripAllNegotiationFieldsAndSpecialCharacters() {
+        for (role in listOf("primary", QyProxyFmt.CN2, QyProxyFmt.CN2_DOWNLOAD)) {
             val original = profile(role)
             val restored = QyProxyFmt.parse(AppConfig.QYPROXY + QyProxyFmt.toUri(original))!!
             assertEquals(original.server, restored.server)
@@ -35,7 +35,7 @@ class QyProxyFmtTest {
     @Test fun missingRequiredAndUnsupportedOrAmbiguousUriFieldsFail() {
         val base = "qyproxy://test-user:test-secret@cn2.example.test:7025?role=cn2&sn=device&game-id=456&server-id=123"
         assertNotNull(QyProxyFmt.parse(base))
-        listOf(base.replace("role=cn2", "role=primary"), base.replace("role=cn2", "role=cn2&role=cn2_download"),
+        listOf(base.replace("role=cn2", "role=unknown"), base.replace("role=cn2", "role=cn2&role=cn2_download"),
             base.replace("sn=device", "sn="), base.replace("game-id=456", "game-id=0"),
             base.replace("game-id=456", "game-id=4294967296"), base.replace("server-id=123", "server-id=-1"),
             base.replace(":7025", ":65536"), base.replace("test-user:test-secret", "test-user"),
@@ -59,11 +59,23 @@ class QyProxyFmtTest {
         invalid.forEach { assertFalse(QyProxyFmt.isValid(it)) }
     }
 
-    @Test fun backupSerializationPreservesBothRoleAndAllMetadata() {
-        val original = profile(QyProxyFmt.CN2_DOWNLOAD)
-        val restored = JsonUtil.fromJson(JsonUtil.toJson(original), ProfileItem::class.java)!!
-        assertEquals(original, restored)
+    @Test fun backupSerializationPreservesAllRolesAndMetadata() {
+        for (role in listOf("primary", QyProxyFmt.CN2, QyProxyFmt.CN2_DOWNLOAD)) {
+            val original = profile(role)
+            val restored = JsonUtil.fromJson(JsonUtil.toJson(original), ProfileItem::class.java)!!
+            assertEquals(original, restored)
+        }
         assertEquals(12, EConfigType.fromInt(12)?.value)
+    }
+
+    @Test fun precedingReleasedCn2ProfileAndSharesWithoutRoleKeepCn2Defaults() {
+        val previous = """{"configVersion":4,"configType":"QYPROXY","subscriptionId":"old-group","addedTime":1791727200000,"remarks":"old CN2","server":"198.51.100.7","serverPort":"7025","username":"old-user","password":"old-secret","qyProxy":{"role":"cn2","sn":"old-device","gameId":456,"serverId":123,"clientType":20,"gameArea":"hk","zone":"sg","product":"hy-android","version":"1.0.0"}}"""
+        val restored = JsonUtil.fromJson(previous, ProfileItem::class.java)!!
+        assertEquals(QyProxyFmt.CN2, restored.qyProxy!!.role)
+        assertEquals("sg", restored.qyProxy!!.zone)
+        assertEquals(restored.qyProxy, QyProxyFmt.parse(AppConfig.QYPROXY + QyProxyFmt.toUri(restored))!!.qyProxy)
+        val withoutRole = "qyproxy://old-user:old-secret@198.51.100.7:7025?sn=old-device&game-id=456&server-id=123"
+        assertEquals(QyProxyFmt.CN2, QyProxyFmt.parse(withoutRole)!!.qyProxy!!.role)
     }
 
     @Test fun precedingReleasedPrivateSocksAndHttpProfilesRemainReadable() {
@@ -79,5 +91,5 @@ class QyProxyFmtTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun invalidRoleCannotBeExportedAsCn2() { QyProxyFmt.toUri(profile("primary")) }
+    fun invalidRoleCannotBeExported() { QyProxyFmt.toUri(profile("unknown")) }
 }

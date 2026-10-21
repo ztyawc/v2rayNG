@@ -563,8 +563,9 @@
     <string name="connection_test_empty_message">no details available</string>
     <string name="value_unknown">unknown</string>
 
-    <string name="server_qyproxy">CN2 / CN2 download</string>
-    <string name="menu_item_import_config_manually_qyproxy">Manual [CN2 / CN2 download]</string>
+    <string name="server_qyproxy">Primary / CN2 / CN2 download</string>
+    <string name="menu_item_import_config_manually_qyproxy">Manual [Primary / CN2 / CN2 download]</string>
+    <string name="qyproxy_primary">Primary</string>
     <string name="qyproxy_cn2">CN2</string>
     <string name="qyproxy_cn2_download">CN2 download</string>
     <string name="qyproxy_sn">Device SN</string>
@@ -575,6 +576,6 @@
     <string name="qyproxy_client_type">Client type</string>
     <string name="qyproxy_product">Client product</string>
     <string name="qyproxy_version">Client version</string>
-    <string name="qyproxy_credentials_hint">Use the raw node username and the CN2-specific secret. Fill in the actual control port, device SN, game and server IDs.</string>
+    <string name="qyproxy_credentials_hint">Primary uses your personal node password; CN2 roles use the dedicated CN2 secret. Enter the raw node username, actual control port, device SN, game ID and server ID.</string>
     <string name="qyproxy_invalid_config">Check the required fields, IPv4 node address or hostname, port (1–65535), and IDs (1–4294967295).</string>
 </resources>

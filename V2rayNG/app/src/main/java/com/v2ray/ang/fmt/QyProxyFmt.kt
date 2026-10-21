@@ -7,8 +7,9 @@ import com.v2ray.ang.extension.idnHost
 import com.v2ray.ang.util.Utils
 import java.net.URI
 
-/** CN2 and CN2 download share QyProxy framing, with separate role sessions. */
+/** Primary, CN2 and CN2 download share QyProxy framing, with separate role sessions. */
 object QyProxyFmt : FmtBase() {
+    const val PRIMARY = "primary"
     const val CN2 = "cn2"
     const val CN2_DOWNLOAD = "cn2_download"
     private val keys = setOf("role", "sn", "game-id", "server-id", "client-type", "game-area", "zone", "product", "version")
@@ -18,7 +19,7 @@ object QyProxyFmt : FmtBase() {
         val port = config.serverPort?.toIntOrNull() ?: return false
         val host = config.server.orEmpty()
         if (host.isBlank() || ':' in host || host.any { it.isWhitespace() || it == '\u0000' } || port !in 1..65535) return false
-        if (options.role != CN2 && options.role != CN2_DOWNLOAD) return false
+        if (options.role != PRIMARY && options.role != CN2 && options.role != CN2_DOWNLOAD) return false
         if (listOf(options.gameId, options.serverId, options.clientType).any { it !in 1..0xffffffffL }) return false
         val username = config.username.orEmpty()
         val texts = listOf(username, config.password.orEmpty(), options.sn, options.gameArea, options.product, options.version)

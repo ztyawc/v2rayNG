@@ -5,6 +5,7 @@ readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly XRAY_DIR="$REPO_DIR/AndroidLibXrayLite/.build/xray-core"
 readonly CMCC_UDP_PATCH="$REPO_DIR/patches/xray-core-cmcc-udp.patch"
 readonly QYPROXY_PATCH="$REPO_DIR/patches/xray-core-qyproxy-cn2.patch"
+readonly QYPROXY_PRIMARY_PATCH="$REPO_DIR/patches/xray-core-qyproxy-primary.patch"
 readonly PLAINTEXT_PATCH="$REPO_DIR/patches/xray-core-plaintext-vless-trojan.patch"
 # The submodule owns the pinned source checkout, patches, assets and native tests.
 OUTPUT_AAR="$REPO_DIR/AndroidLibXrayLite/.build/libv2ray-base-arm64.aar" \
@@ -15,6 +16,8 @@ git -C "$XRAY_DIR" apply --check "$CMCC_UDP_PATCH"
 git -C "$XRAY_DIR" apply "$CMCC_UDP_PATCH"
 git -C "$XRAY_DIR" apply --check "$QYPROXY_PATCH"
 git -C "$XRAY_DIR" apply "$QYPROXY_PATCH"
+git -C "$XRAY_DIR" apply --check "$QYPROXY_PRIMARY_PATCH"
+git -C "$XRAY_DIR" apply "$QYPROXY_PRIMARY_PATCH"
 git -C "$XRAY_DIR" apply --check "$PLAINTEXT_PATCH"
 git -C "$XRAY_DIR" apply "$PLAINTEXT_PATCH"
 (

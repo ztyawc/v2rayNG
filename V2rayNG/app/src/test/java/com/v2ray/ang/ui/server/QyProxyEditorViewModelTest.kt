@@ -12,6 +12,8 @@ import kotlinx.coroutines.test.*
 import org.junit.Assert.*
 import org.junit.Test
 
+// ExperimentalCoroutinesApi is needed for deterministic main-dispatcher tests.
+// Remove this opt-in when setMain/resetMain and advanceUntilIdle are stable in the pinned coroutines-test version.
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class QyProxyEditorViewModelTest {
     private fun profile() = ProfileItem.create(EConfigType.QYPROXY).apply {
@@ -75,7 +77,7 @@ class QyProxyEditorViewModelTest {
             assertEquals(R.string.qyproxy_invalid_config, invalid.uiState.value.error)
             invalid.onAction(QyProxyEditorAction.Edit(QyProxyField.ServerId, "123"))
             assertNull(invalid.uiState.value.error)
-            invalid.onAction(QyProxyEditorAction.Role("primary"))
+            invalid.onAction(QyProxyEditorAction.Role("unknown"))
             invalid.onAction(QyProxyEditorAction.Save)
             assertEquals(R.string.qyproxy_invalid_config, invalid.uiState.value.error)
         } finally { Dispatchers.resetMain() }
@@ -185,6 +187,49 @@ class QyProxyEditorViewModelTest {
             assertFalse(called)
             assertFalse(vm.uiState.value.ready)
             assertNull(vm.uiState.value.savedGuid)
+        } finally { Dispatchers.resetMain() }
+    }
+
+    @Test fun primarySelectionSavesAndReopensPersonalCredentialsAndZoneByGuid() = runTest {
+        val d = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(d)
+        var stored = profile()
+        try {
+            val handle = SavedStateHandle()
+            val vm = QyProxyEditorViewModel(handle, { stored }, { guid, config ->
+                assertEquals("primary-guid", guid)
+                stored = config
+                guid
+            }, { "primary-guid" }, d)
+            assertTrue(vm.uiState.value.loading)
+            assertEquals("cn2", vm.uiState.value.role)
+            vm.open("primary-guid", "", true)
+            advanceUntilIdle()
+            vm.onAction(QyProxyEditorAction.Role("primary"))
+            vm.onAction(QyProxyEditorAction.Edit(QyProxyField.Password, "personal-node-password"))
+            vm.onAction(QyProxyEditorAction.Edit(QyProxyField.Zone, "sg"))
+            val restored = QyProxyEditorViewModel(handle, { stored }, { guid, config ->
+                stored = config
+                guid
+            }, { "primary-guid" }, d)
+            restored.open("primary-guid", "", true)
+            advanceUntilIdle()
+            assertEquals("primary", restored.uiState.value.role)
+            restored.onAction(QyProxyEditorAction.Save)
+            assertTrue(restored.uiState.value.saving)
+            advanceUntilIdle()
+            assertEquals("primary-guid", restored.uiState.value.savedGuid)
+            assertTrue(restored.uiState.value.restartService)
+            assertEquals("stable-group", stored.subscriptionId)
+            assertEquals("primary", stored.qyProxy!!.role)
+            assertEquals("personal-node-password", stored.password)
+            assertEquals("hk", stored.qyProxy!!.gameArea)
+            assertEquals("sg", stored.qyProxy!!.zone)
+            val reopen = QyProxyEditorViewModel(SavedStateHandle(), { stored }, { _, _ -> error("Unexpected save") }, { "" }, d)
+            reopen.open("primary-guid", "", false)
+            advanceUntilIdle()
+            assertEquals("primary", reopen.uiState.value.role)
+            assertEquals("sg", reopen.uiState.value.fields[QyProxyField.Zone])
         } finally { Dispatchers.resetMain() }
     }
 

@@ -26,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -74,26 +75,31 @@ class ServerQyProxyActivity : BaseComponentActivity() {
                 state.error?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
                 Text(stringResource(R.string.qyproxy_credentials_hint))
                 Column(Modifier.selectableGroup()) {
-                    listOf(QyProxyFmt.CN2 to R.string.qyproxy_cn2, QyProxyFmt.CN2_DOWNLOAD to R.string.qyproxy_cn2_download).forEach { (role, label) ->
-                        Row(modifier = Modifier.fillMaxWidth().selectable(selected = state.role == role, role = Role.RadioButton,
-                            enabled = state.ready && !state.saving, onClick = { viewModel.onAction(QyProxyEditorAction.Role(role)) })
-                            .padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            RadioButton(selected = state.role == role, onClick = null, enabled = state.ready && !state.saving)
-                            Text(stringResource(label))
+                    listOf(QyProxyFmt.PRIMARY to R.string.qyproxy_primary, QyProxyFmt.CN2 to R.string.qyproxy_cn2,
+                        QyProxyFmt.CN2_DOWNLOAD to R.string.qyproxy_cn2_download).forEach { (role, label) ->
+                        key(role) {
+                            Row(modifier = Modifier.fillMaxWidth().selectable(selected = state.role == role, role = Role.RadioButton,
+                                enabled = state.ready && !state.saving, onClick = { viewModel.onAction(QyProxyEditorAction.Role(role)) })
+                                .padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                RadioButton(selected = state.role == role, onClick = null, enabled = state.ready && !state.saving)
+                                Text(stringResource(label))
+                            }
                         }
                     }
                 }
                 QyProxyField.entries.forEach { field ->
-                    OutlinedTextField(value = state.fields[field].orEmpty(), onValueChange = {
-                        viewModel.onAction(QyProxyEditorAction.Edit(field, it))
-                    }, label = { Text(stringResource(field.label)) }, modifier = Modifier.fillMaxWidth(),
-                        enabled = state.ready && !state.saving, singleLine = true,
-                        visualTransformation = if (field == QyProxyField.Password) PasswordVisualTransformation() else VisualTransformation.None,
-                        keyboardOptions = KeyboardOptions(keyboardType = when {
-                            field.numeric -> KeyboardType.Number
-                            field == QyProxyField.Password -> KeyboardType.Password
-                            else -> KeyboardType.Text
-                        }))
+                    key(field) {
+                        OutlinedTextField(value = state.fields[field].orEmpty(), onValueChange = {
+                            viewModel.onAction(QyProxyEditorAction.Edit(field, it))
+                        }, label = { Text(stringResource(field.label)) }, modifier = Modifier.fillMaxWidth(),
+                            enabled = state.ready && !state.saving, singleLine = true,
+                            visualTransformation = if (field == QyProxyField.Password) PasswordVisualTransformation() else VisualTransformation.None,
+                            keyboardOptions = KeyboardOptions(keyboardType = when {
+                                field.numeric -> KeyboardType.Number
+                                field == QyProxyField.Password -> KeyboardType.Password
+                                else -> KeyboardType.Text
+                            }))
+                    }
                 }
             }
         }

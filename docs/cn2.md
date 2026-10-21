@@ -1,23 +1,26 @@
-# CN2 与 CN2 下载
+# QyProxy 主线、CN2 与 CN2 下载
 
-本实现对应用户提供的《爱家加速协议与实现手册-20260926》`03-QyProxy与三种线路.md`。应用支持 QyProxy 的 `cn2` 和 `cn2_download` 两个角色，每个出站分别维护控制会话、数据 token、动态 TCP/UDP 端口池和 DNS 缓存。
+本实现对应用户提供的《爱家加速协议与实现手册-20260926》`03-QyProxy与三种线路.md`。应用支持 QyProxy 的 `primary`、`cn2` 和 `cn2_download` 三个角色，每个出站分别维护控制会话、数据 token、动态 TCP/UDP 端口池和 DNS 缓存。
 
 ## 添加节点
 
-在主界面的添加菜单选择 **手动输入 [CN2 / CN2 下载]**，选择线路角色，填写节点 IPv4 地址或域名、实际控制端口、原始节点用户名、CN2 专用 secret、设备 SN、游戏 ID、区服 ID 和游戏区域。客户端类型、产品和版本可以按实际节点要求填写；默认值来自手册的独立实现。
+在主界面的添加菜单选择 **手动输入 [主线 / CN2 / CN2 下载]**，选择线路角色，填写节点 IPv4 地址或域名、实际控制端口、原始节点用户名、对应密码、设备 SN、游戏 ID、区服 ID 和游戏区域。主线填写个人节点密码；CN2 和 CN2 下载填写 CN2 专用 secret。客户端类型、产品和版本可以按实际节点要求填写；默认值来自手册的独立实现。
 
-手册公开示例没有提供可直接登录的用户名或 CN2 专用 secret，需填写自己已有的有效节点信息。用户名由内核按 `原始用户名&客户端类型&游戏ID&SN` 拼接。游戏 ID 与区服 ID 是两个独立字段。
+手册公开示例没有提供可直接登录的用户名、个人节点密码或 CN2 专用 secret，需填写自己已有的有效节点信息。主线的个人节点密码是业务 `/auth` 解密后获得的节点密码，不是业务账号登录密码或教育 SOCKS 密码。用户名由内核按 `原始用户名&客户端类型&游戏ID&SN` 拼接。游戏 ID 与区服 ID 是两个独立字段。
 
 也可以从剪贴板、二维码或订阅导入 `qyproxy://` 链接，格式如下。示例只使用文档地址和合成凭据：
 
 ```text
+qyproxy://test-user:personal-node-password@198.51.100.9:7025?role=primary&sn=test-device&game-id=456&server-id=123&game-area=hk&zone=sg#Primary
 qyproxy://test-user:test-secret@198.51.100.7:7025?role=cn2&sn=test-device&game-id=456&server-id=123&game-area=hk#CN2
 qyproxy://test-user:test-secret@198.51.100.8:7025?role=cn2_download&sn=test-device&game-id=456&server-id=123&game-area=hk#CN2-download
 ```
 
 用户名和 secret 分别按 URI component 编码，特殊字符不会作为分隔符解释。重复参数、未知参数、缺失身份参数、越界 ID、IPv6 节点地址以及不支持的 role 会拒绝导入。已有配置格式与字段没有改名；增加的 `ProfileItem.qyProxy` 是可选字段，旧私有 SOCKS 和 HTTP 配置读取回归已覆盖。
 
-两种角色会在 Configure 的连接区域和选择区域填写对应 role，游戏区域单独保留；导入的 zone 值随配置保留，但这些角色在握手中按手册固定使用 role。全局 Mux 在此协议上关闭。
+主线在 Configure 的连接区域填写 game-area、选择区域填写 zone；zone 为空时使用 game-area。CN2 两种角色在连接区域和选择区域填写对应 role，游戏区域单独保留；导入的 zone 值随配置保留，但 CN2 在握手中按手册固定使用 role。主线与 CN2 的密码不会相互替换。全局 Mux 在此协议上关闭。
+
+为兼容之前发布的 CN2 配置，缺少 role 的旧分享链接、新建表单和 `QyProxyOptions` 仍默认使用 `cn2`。添加主线时需要明确选择“主线”或设置 `role=primary`。协议类型编号、持久化字段和 URI scheme 均保持原值。
 
 ## 传输与生命周期
 
@@ -25,14 +28,15 @@ qyproxy://test-user:test-secret@198.51.100.8:7025?role=cn2_download&sn=test-devi
 - 同一出站的 TCP/UDP 共享登录，单个请求取消不结束其他请求使用的控制会话。控制断线或心跳超时会关闭旧数据 socket，按 2/5/10 秒退避进行完整重新认证；认证拒绝或重试耗尽后需更新配置并重载。
 - TCP 初始化保留有序与重复目标选项，累积读取 14 字节 ACK；之后双向连续 XOR，各自维护偏移。短写按实际写出长度推进，copy 不绕过编解码。Xray 统计包装后的 TCP socket 仍可传递半关闭。服务器先发出 FIN 时会及时发送已缓冲的回复和 EOF，后续上行超时不丢弃已完成的下行数据。
 - UDP 使用带目标/来源 IPv4 的独立数据帧，只有 payload 做 XOR，每包从 mask 的位置零开始。按实际接收长度解析，检查真正的节点来源，丢弃错误来源和不支持的报文格式。
-- 域名目标通过当前隧道查询 A 记录；CN2 DNS 使用普通 UDP，不添加主线 DNS 前缀。并发同 ID 查询会改写关联内 ID，校验回复 question，再恢复原 ID 和 DNS 目标。DNS 缓存随认证代次回收。
+- 域名目标通过当前隧道查询 A 记录；主线使用本次 ACK 提供的专用 DNS 地址和端口，并在 XOR 前添加 `01 | 区域字节长度 | game-area` 前缀。节点侧回环 DNS 是隧道内目的地，不会在手机本地直接连接。CN2 DNS 使用普通 UDP，不添加主线 DNS 前缀。并发同 ID 查询会改写关联内 ID，校验回复 question，再恢复原 ID 和 DNS 目标。DNS 缓存随认证代次回收。
+- 主线使用 CODE7 成功响应中的 type2 数据会话材料，忽略后续认证用的 type3 token，不会将它替代数据 token。主线与 CN2 仍分别维护控制会话。
 - native outbound 关闭会取消并等待所有活跃请求、数据 worker 和控制登录退出；关闭后的请求被拒绝。
 
-当前范围与手册参考实现一致：IPv4 数据地址、普通 TCP 与未分片 UDP。CN2 每个上行 UDP payload 最多 1190 字节，超限明确返回错误。不包含协议分片、IPv6 数据地址、KCP、fake TCP、QyVpn、Hop、CODE9 恢复、业务账号自动刷新或 APP 的自动分流策略。
+当前范围与手册参考实现一致：IPv4 数据地址、普通 TCP 与未分片 UDP。主线数据 MTU 为 1400，普通 UDP payload 最多 1390 字节；主线 DNS 还需扣除 `2 + UTF-8(game-area).size` 字节。CN2 数据 MTU 为 1200，上行 UDP payload 最多 1190 字节，超限明确返回错误。不包含协议分片、IPv6 数据地址、KCP、fake TCP、QyVpn、Hop、CODE9 恢复、业务账号自动刷新或 APP 的自动分流策略。
 
 ## 源码与 ARM64 构建
 
-基础 AndroidLibXrayLite gitlink 为 `a211a9bf4436b12736a754f26dee579d0126a90b`，Xray 固定源码为 `5ca6f4b7d4dc20a881d4330e498892697627ec0c`。主仓库在基础 HTTP/私有 SOCKS 补丁和 UDP 增量补丁后应用 [CN2 补丁](../patches/xray-core-qyproxy-cn2.patch)，不依赖已跟踪的子模块源码修改。
+基础 AndroidLibXrayLite gitlink 为 `a211a9bf4436b12736a754f26dee579d0126a90b`，Xray 固定源码为 `5ca6f4b7d4dc20a881d4330e498892697627ec0c`。主仓库在基础 HTTP/私有 SOCKS 补丁和 UDP 增量补丁后应用 [CN2 补丁](../patches/xray-core-qyproxy-cn2.patch)及[主线增量补丁](../patches/xray-core-qyproxy-primary.patch)，不依赖已跟踪的子模块源码修改。无 TLS VLESS / Trojan 兼容补丁继续应用。
 
 QyProxy transport 和合成测试改编自 ZIP 附带的 `ztyawc/mihomo-cn2` 提交 `0d09a3da4fc9b9c400a33bbd6b0e04c6543d362a`。补丁内保留 GPLv3 许可和来源说明。Xray 配置、出站接口、统计包装、实际 UDP 来源和请求生命周期由本项目接入。
 
@@ -61,9 +65,9 @@ GOWORK=off go test ./infra/conf -run '^(TestSocks|TestQyProxy)'
 
 ARM64 APK 要包含 `libgojni.so`、`libhev-socks5-tunnel.so` 和 `libhevsockstun.so`。从根部运行 `python3 scripts/check_native_packaging.py V2rayNG/app/build/outputs/apk/telecom/debug --abis arm64-v8a` 检查。
 
-## 本次检查结果
+## 首次 CN2 接入的历史检查记录
 
-2026-10-02 当前工作树的结果：
+以下为 2026-10-02 引入 CN2 时的结果，不包含之后新增的主线功能。主线的检查命令和运行边界见文末。
 
 - 原生协议测试、Go race 检查和完整 Xray 配置加载测试通过，包括共享控制会话、TCP 半关闭、服务器先发 FIN、UDP 来源检查、DNS 并发和关闭取消。
 - Playstore、Fdroid、Telecom 各 147 项单元测试通过，合计 441 次执行；新增协议、出站配置与编辑器状态的 15 项测试包含在其中。
@@ -72,7 +76,7 @@ ARM64 APK 要包含 `libgojni.so`、`libhev-socks5-tunnel.so` 和 `libhevsockstu
 
 这些结果不包含下面列出的手机与真实节点运行场景。产物为 debug 签名的测试 APK。
 
-## Not run
+### 首次 CN2 接入时的 Not run
 
 | 场景或命令 | 原因 |
 | --- | --- |
@@ -83,3 +87,35 @@ ARM64 APK 要包含 `libgojni.so`、`libhev-socks5-tunnel.so` 和 `libhevsockstu
 | 远端 GitHub Actions 验收 | 此记录只列本地检查结果；推送会触发构建，远端结果见仓库 Actions。 |
 
 上述结果只覆盖列出的自动化检查，不表示手机或真实节点运行场景已通过。此前 UDP 的 x86_64 设备验收是加入 CN2 前的记录，不能代替本次检查。
+
+## 主线接入检查（2026-10-21）
+
+`build-libv2ray.sh` 会从固定源版本重新应用全部补丁，并执行三角色的 Go 测试。
+原生模拟节点检查主线个人密码、独立 game-area / zone、CODE7 的两种 token、
+动态数据端口、1400 字节 MTU、TCP / UDP 共用认证、专用 DNS 目的地和区域前缀，
+以及 DNS 原始事务 ID / 解析器地址的还原。传输层还检查三角色 UDP 的最大有效载荷、
+主线 DNS 前缀占用帧预算和缺失专用 DNS 端点时明确失败。
+
+应用侧的可复现检查：
+
+```sh
+cd V2rayNG
+./gradlew :app:testPlaystoreDebugUnitTest \
+  --tests com.v2ray.ang.fmt.QyProxyFmtTest \
+  --tests com.v2ray.ang.core.CoreOutboundBuilderQyProxyTest \
+  --tests com.v2ray.ang.ui.server.QyProxyEditorViewModelTest
+./gradlew :app:testPlaystoreDebugUnitTest :app:testFdroidDebugUnitTest \
+  :app:testTelecomDebugUnitTest :app:compilePlaystoreDebugKotlin \
+  :app:assemblePlaystoreDebug :app:assembleFdroidDebug :app:assembleTelecomDebug \
+  :app:lintPlaystoreDebug :app:lintFdroidDebug :app:lintTelecomDebug
+```
+
+这些 JUnit 检查覆盖主线分享与备份往返、个人密码和 zone 保留、表单角色选择、
+按 GUID 恢复未保存状态、保存后重开，以及旧 CN2 配置和省略 role 的链接继续按 CN2 读取。
+
+### 主线 Not run
+
+| 场景 | 原因 |
+| --- | --- |
+| ARM64 Android 上导入主线链接，在 VPN、仅代理及 root 模式连接真实主线，检查 TCP / 普通 UDP / 域名 DNS、停止重连与网络切换 | 没有连接的 ARM64 设备，也没有有效主线节点凭据。Go 回环测试不验证 Android JNI、服务入口或实际节点互通。 |
+| 主线角色的触摸、键盘及 D-pad 选择和保存；打开 IME 后遍历首尾控件并保存；TalkBack 标签、选中状态、单一行焦点及激活；Activity 重建；关闭重开后通过存储管理器核对角色、密码和 zone | 缺少 ARM64 Android 设备。ViewModel 与存储模拟测试不能替代设备交互和持久化检查。 |

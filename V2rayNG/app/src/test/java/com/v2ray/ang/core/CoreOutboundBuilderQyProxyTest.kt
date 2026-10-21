@@ -18,7 +18,7 @@ class CoreOutboundBuilderQyProxyTest {
     }
 
     @Test fun nativeSettingsPreserveRoleCredentialsAndDistinctGameAndServerIds() {
-        for (role in listOf("cn2", "cn2_download")) {
+        for (role in listOf("primary", "cn2", "cn2_download")) {
             val p = profile().apply { qyProxy = qyProxy!!.copy(role = role) }
             val out = CoreOutboundBuilder.toOutboundQyProxy(p)!!
             assertEquals("qyproxy", out.protocol)
@@ -42,9 +42,22 @@ class CoreOutboundBuilderQyProxyTest {
     }
 
     @Test fun invalidNativeSettingsAreRejected() {
-        listOf(profile().apply { qyProxy = null }, profile().apply { qyProxy = qyProxy!!.copy(role = "primary") },
+        listOf(profile().apply { qyProxy = null }, profile().apply { qyProxy = qyProxy!!.copy(role = "unknown") },
             profile().apply { qyProxy = qyProxy!!.copy(sn = "") }, profile().apply { serverPort = "0" },
             profile().apply { qyProxy = qyProxy!!.copy(serverId = 0x100000000L) })
             .forEach { assertNull(CoreOutboundBuilder.toOutboundQyProxy(it)) }
+    }
+
+    @Test fun primaryPreservesPersonalPasswordAndIndependentGameAreaAndZone() {
+        val p = profile().apply {
+            password = "personal-node-password"
+            qyProxy = qyProxy!!.copy(role = "primary", gameArea = "hk", zone = "sg")
+        }
+        val out = CoreOutboundBuilder.toOutboundQyProxy(p)!!
+        assertEquals("primary", out.settings!!.role)
+        assertEquals("personal-node-password", out.settings!!.password)
+        assertEquals("hk", out.settings!!.gameArea)
+        assertEquals("sg", out.settings!!.zone)
+        assertFalse(out.mux!!.enabled)
     }
 }
