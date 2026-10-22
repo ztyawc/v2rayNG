@@ -18,6 +18,10 @@ open class FmtBase {
      * @return the converted URI string
      */
     fun toUri(config: ProfileItem, userInfo: String?, dicQuery: HashMap<String, String>?): String {
+        return toUriWithEncodedUserInfo(config, Utils.encodeURIComponent(userInfo.orEmpty()), dicQuery)
+    }
+
+    protected fun toUriWithEncodedUserInfo(config: ProfileItem, userInfo: String, dicQuery: HashMap<String, String>?): String {
         val query = if (dicQuery != null)
             "?" + dicQuery.toList().joinToString(
                 separator = "&",
@@ -26,7 +30,7 @@ open class FmtBase {
 
         val url = String.format(
             "%s@%s:%s",
-            Utils.encodeURIComponent(userInfo ?: ""),
+            userInfo,
             Utils.getIpv6Address(HttpUtil.toIdnDomain(config.server.orEmpty())),
             config.serverPort
         )
