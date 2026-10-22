@@ -44,6 +44,14 @@ android {
     }
 
     buildTypes {
+        create("sniTest") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".uusnitest"
+            versionNameSuffix = "-uusni-test"
+            matchingFallbacks += listOf("debug")
+            // Test APKs coexist with the installed app and never fetch releases.
+            buildConfigField("boolean", "SELF_UPDATE_ENABLED", "false")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

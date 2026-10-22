@@ -21,6 +21,7 @@ data class ProfileItem(
     var username: String? = null,
     var cmccProtocol: String? = null,
     var qyProxy: QyProxyOptions? = null,
+    var uuSni: UuSniOptions? = null,
     var httpHeaders: Map<String, String>? = null,
 
     var network: String? = null,

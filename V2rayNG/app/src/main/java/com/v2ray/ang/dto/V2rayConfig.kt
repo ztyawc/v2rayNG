@@ -82,6 +82,9 @@ data class V2rayConfig(
             var pass: String? = null,
             var headers: Map<String, String>? = null,
             var cmccProtocol: String? = null,
+            /*UU custom SNI/TCP*/
+            var obfsKey: Int? = null,
+            var sniCrypt: Boolean? = null,
             /*QyProxy CN2*/
             var role: String? = null,
             var sn: String? = null,

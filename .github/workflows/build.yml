@@ -100,6 +100,8 @@ jobs:
         for variant in playstore fdroid telecom; do
           python3 ../scripts/check_native_packaging.py "app/build/outputs/apk/$variant/debug"
         done
+        ./gradlew :app:assembleTelecomSniTest
+        python3 ../scripts/check_native_packaging.py app/build/outputs/apk/telecom/sniTest --abis arm64-v8a
     
     - name: Upload telecom arm64-v8a APK
       uses: actions/upload-artifact@v7
@@ -107,3 +109,10 @@ jobs:
       with:
         name: telecom-arm64-v8a
         path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/telecom/debug/*arm64-v8a*.apk
+
+    - name: Upload UU SNI test APK
+      uses: actions/upload-artifact@v7
+      if: ${{ success() }}
+      with:
+        name: uusni-test-arm64-v8a
+        path: ${{ github.workspace }}/V2rayNG/app/build/outputs/apk/telecom/sniTest/*arm64-v8a*.apk
