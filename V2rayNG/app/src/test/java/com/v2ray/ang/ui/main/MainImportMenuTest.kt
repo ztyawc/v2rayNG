@@ -8,6 +8,12 @@ import org.junit.Test
 class MainImportMenuTest {
 
     @Test
+    fun importMenuCreatesTheNativeUuSniProfileType() {
+        assertEquals(R.string.menu_item_import_config_manually_uusni, ImportMenuAction.UuSni.labelRes)
+        assertEquals(MainAction.ImportManually(EConfigType.UUSNI.value), ImportMenuAction.UuSni.action)
+    }
+
+    @Test
     fun importMenuIncludesPrivateSocksAfterRegularSocks() {
         assertEquals(ImportMenuAction.Socks.ordinal + 1, ImportMenuAction.PrivateSocks.ordinal)
         assertEquals(

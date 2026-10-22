@@ -22,6 +22,7 @@ internal enum class ImportMenuAction(@StringRes val labelRes: Int, val action: M
     Socks(R.string.menu_item_import_config_manually_socks, MainAction.ImportManually(EConfigType.SOCKS.value)),
     PrivateSocks(R.string.menu_item_import_config_manually_private_socks, MainAction.ImportManually(EConfigType.PRIVATE_SOCKS.value)),
     QyProxy(R.string.menu_item_import_config_manually_qyproxy, MainAction.ImportManually(EConfigType.QYPROXY.value)),
+    UuSni(R.string.menu_item_import_config_manually_uusni, MainAction.ImportManually(EConfigType.UUSNI.value)),
     Http(R.string.menu_item_import_config_manually_http, MainAction.ImportManually(EConfigType.HTTP.value)),
     Trojan(R.string.menu_item_import_config_manually_trojan, MainAction.ImportManually(EConfigType.TROJAN.value)),
     WireGuard(R.string.menu_item_import_config_manually_wireguard, MainAction.ImportManually(EConfigType.WIREGUARD.value)),

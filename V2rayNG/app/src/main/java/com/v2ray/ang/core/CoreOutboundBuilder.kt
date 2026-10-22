@@ -11,6 +11,7 @@ import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.extension.nullIfBlank
 import com.v2ray.ang.fmt.CmccSocksFmt
 import com.v2ray.ang.fmt.QyProxyFmt
+import com.v2ray.ang.fmt.UuSniFmt
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
@@ -31,6 +32,7 @@ object CoreOutboundBuilder {
             EConfigType.SOCKS -> toOutboundSocks(profileItem)
             EConfigType.PRIVATE_SOCKS -> toOutboundPrivateSocks(profileItem)
             EConfigType.QYPROXY -> toOutboundQyProxy(profileItem)
+            EConfigType.UUSNI -> toOutboundUuSni(profileItem)
             EConfigType.VLESS -> toOutboundVless(profileItem)
             EConfigType.TROJAN -> toOutboundTrojan(profileItem)
             EConfigType.WIREGUARD -> toOutboundWireguard(profileItem)
@@ -53,6 +55,7 @@ object CoreOutboundBuilder {
             if (protocol.equals(EConfigType.SHADOWSOCKS.name, true)
                 || protocol.equals(EConfigType.SOCKS.name, true)
                 || protocol.equals(EConfigType.QYPROXY.name, true)
+                || protocol.equals(EConfigType.UUSNI.name, true)
                 || protocol.equals(EConfigType.HTTP.name, true)
                 || protocol.equals(EConfigType.TROJAN.name, true)
                 || protocol.equals(EConfigType.WIREGUARD.name, true)
@@ -93,6 +96,7 @@ object CoreOutboundBuilder {
             EConfigType.SOCKS,
             EConfigType.HTTP,
             EConfigType.QYPROXY,
+            EConfigType.UUSNI,
             EConfigType.TROJAN -> OutboundBean(
                 protocol = configType.name.lowercase(),
                 settings = OutboundBean.OutSettingsBean(),
@@ -290,6 +294,22 @@ object CoreOutboundBuilder {
                 clientVersion = options.version
                 level = AppConfig.DEFAULT_LEVEL
             }
+        }
+    }
+
+    internal fun toOutboundUuSni(profileItem: ProfileItem): OutboundBean? {
+        if (!UuSniFmt.isValid(profileItem)) return null
+        val options = profileItem.uuSni ?: return null
+        return createInitOutbound(EConfigType.UUSNI)?.apply {
+            settings?.apply {
+                address = profileItem.server
+                port = profileItem.serverPort?.toIntOrNull()
+                obfsKey = options.obfsKey
+                sniCrypt = options.sniCrypt
+                level = AppConfig.DEFAULT_LEVEL
+            }
+            mux?.enabled = false
+            mux?.concurrency = -1
         }
     }
 
