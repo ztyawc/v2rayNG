@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI（TCP）</string>
+    <string name="menu_item_import_config_manually_uusni">手动输入 [UU SNI]</string>
+    <string name="uusni_obfs_key">混淆值（obfs_key，0–255）</string>
+    <string name="uusni_crypt">加密目标地址（sni_crypt）</string>
+    <string name="uusni_hint">仅支持 TCP。请填写采集到的节点 IPv4、端口及混淆值。</string>
+    <string name="uusni_invalid_config">请填写备注、有效的节点 IPv4、1–65535 的端口和 0–255 的混淆值。</string>
+</resources>

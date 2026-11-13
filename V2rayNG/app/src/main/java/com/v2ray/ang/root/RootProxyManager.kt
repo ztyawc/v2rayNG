@@ -2,6 +2,7 @@ package com.v2ray.ang.root
 
 import android.content.Context
 import android.os.Process
+import android.util.AtomicFile
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.handler.SettingsManager
@@ -52,7 +53,7 @@ object RootProxyManager {
         val script = buildTun2socksSetup(context) ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
         if (!result.success) {
-            LogUtil.e(AppConfig.TAG, "RootProxyManager: setup failed, rolling back:\n${result.output}")
+            LogUtil.w(AppConfig.TAG, "Root mode phase=setup failed exit=${result.code}", java.io.IOException("Root setup failed"))
             teardown(context)
             return false
         }
@@ -71,7 +72,7 @@ object RootProxyManager {
             ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
         if (!result.success) {
-            LogUtil.e(AppConfig.TAG, "RootProxyManager: client sharing setup failed:\n${result.output}")
+            LogUtil.w(AppConfig.TAG, "VPN LAN mode phase=setup failed exit=${result.code}", java.io.IOException("LAN setup failed"))
             teardown(context)
             return false
         }
@@ -86,7 +87,8 @@ object RootProxyManager {
     }
 
     private fun teardown(context: Context) {
-        RootShell.runScript(context, "teardown_rules.sh", buildTeardown(context))
+        val result = RootShell.runScript(context, "teardown_rules.sh", buildTeardown(context), timeoutMillis = 1500)
+        check(result.success) { "Root routing cleanup failed" }
     }
 
     // --------------------------------------------------------------- TUN2SOCKS
@@ -109,15 +111,27 @@ object RootProxyManager {
             return null
         }
         val appUid = context.applicationInfo.uid
+        val socksUsername = SettingsManager.getSocksUsername()
+        val socksPassword = SettingsManager.getSocksPassword()
         val port = SettingsManager.getSocksPort()
-        val runDir = File(context.filesDir, AppConfig.ROOT_RUNTIME_DIR).apply { mkdirs() }
+        val runDir = File(context.filesDir, AppConfig.ROOT_RUNTIME_DIR)
+        if (!runDir.isDirectory && !runDir.mkdirs()) {
+            LogUtil.e(AppConfig.TAG, "RootProxyManager: failed to create runtime directory at ${runDir.absolutePath}")
+            return null
+        }
         val pidFile = File(runDir, "tun2socks.pid").absolutePath
         val logFile = File(runDir, "tun2socks.log").absolutePath
-        val cfgFile = File(runDir, "tun2socks.yml").absolutePath
+        val cfgFile = File(runDir, "tun2socks.yml")
         val oomGuardPid = File(runDir, "oomguard.pid").absolutePath
         val ipv6 = MmkvManager.decodeSettingsBool(AppConfig.PREF_IPV6_ENABLED)
         val lanShare = forceLanShare || MmkvManager.decodeSettingsBool(AppConfig.PREF_ROOT_LAN_SHARING)
         val corePid = Process.myPid()
+
+        val config = buildHevConfig(socksUsername, socksPassword, port, ipv6)
+        if (!writeHevConfig(cfgFile, config)) {
+            return null
+        }
+        val cfgPath = cfgFile.absolutePath
 
         // Per-app proxy/bypass (mirrors what VpnService does via allowed/disallowed apps).
         val perAppEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_PER_APP_PROXY)
@@ -139,15 +153,9 @@ object RootProxyManager {
             appendLine("echo \$! > '$oomGuardPid'")
             // tun device node
             appendLine("if [ ! -e /dev/net/tun ]; then mkdir -p /dev/net; mknod /dev/net/tun c 10 200; chmod 666 /dev/net/tun; fi")
-            // hev-socks5-tunnel config: it creates the tun ($TUN) itself and forwards it to the
-            // in-process core's SOCKS inbound on loopback. MTU comes from the existing VPN MTU
-            // setting. No fwmark on hev's sockets: its only upstream connection is to 127.0.0.1
-            // (loopback, already RETURNed by the 127.0.0.0/8 bypass) and the core's real outbound
-            // runs as the app uid (RETURNed by the uid-owner rule), so traffic can't loop.
-            appendLine("cat > '$cfgFile' <<'HEVCFG'")
-            append(buildHevConfig(port, ipv6))
-            appendLine("HEVCFG")
-            appendLine("nohup \"\$BIN\" '$cfgFile' >'$logFile' 2>&1 &")
+            // The HEV config is written separately by the app process. Never place credentials
+            // in this root shell script, even when YAML quoting would otherwise be valid.
+            appendLine("nohup \"\$BIN\" '$cfgPath' >'$logFile' 2>&1 &")
             appendLine("T2S_PID=\$!")
             appendLine("echo \$T2S_PID > '$pidFile'")
             appendLine("echo ${AppConfig.ROOT_OOM_SCORE} > /proc/\$T2S_PID/oom_score_adj 2>/dev/null || true")
@@ -195,7 +203,7 @@ object RootProxyManager {
      * tun address when IPv6 is enabled; whether v6 actually flows in is decided separately by
      * the v6 route into [TABLE].
      */
-    private fun buildHevConfig(socksPort: Int, ipv6: Boolean): String {
+    private fun buildHevConfig(socksUsername: String?, socksPassword: String?, socksPort: Int, ipv6: Boolean): String {
         val v4 = AppConfig.ROOT_TUN_ADDR_V4.substringBefore("/")
         val v6 = AppConfig.ROOT_TUN_ADDR_V6.substringBefore("/")
         return buildString {
@@ -209,7 +217,31 @@ object RootProxyManager {
             appendLine("  port: $socksPort")
             appendLine("  address: '${AppConfig.LOOPBACK}'")
             appendLine("  udp: 'udp'")
+            if (socksUsername != null && socksPassword != null) {
+                appendLine("  username: ${socksUsername.toSingleQuotedYamlScalar()}")
+                appendLine("  password: ${socksPassword.toSingleQuotedYamlScalar()}")
+            }
             appendLine("  tcp-fastopen: true")
+        }
+    }
+
+    private fun writeHevConfig(file: File, config: String): Boolean {
+        val atomicFile = AtomicFile(file)
+        val output = try {
+            atomicFile.startWrite()
+        } catch (e: Exception) {
+            LogUtil.e(AppConfig.TAG, "RootProxyManager: failed to open HEV config at ${file.absolutePath}", e)
+            return false
+        }
+
+        return try {
+            output.write(config.toByteArray(Charsets.UTF_8))
+            atomicFile.finishWrite(output)
+            true
+        } catch (e: Exception) {
+            atomicFile.failWrite(output)
+            LogUtil.e(AppConfig.TAG, "RootProxyManager: failed to write HEV config at ${file.absolutePath}", e)
+            false
         }
     }
 
@@ -464,6 +496,27 @@ object RootProxyManager {
             appendLine("[ -f '$oomGuardPid' ] && kill \$(cat '$oomGuardPid') 2>/dev/null || true")
             appendLine("rm -f '$oomGuardPid'")
             appendLine("echo 0 > /proc/$corePid/oom_score_adj 2>/dev/null || true")
+            // Deleting an absent rule is harmless; a remaining rule must keep the core
+            // listener alive until cleanup succeeds, rather than report a false stop.
+            for ((table, chain) in listOf("mangle" to CHAIN, "filter" to AppConfig.ROOT_FWD_CHAIN, "nat" to AppConfig.ROOT_DNS_CHAIN)) {
+                appendLine("rules=\$(iptables -t $table -S 2>/dev/null) || exit 1")
+                appendLine("printf '%s\\n' \"\$rules\" | grep -q '$chain' && exit 1")
+            }
+            for ((table, chain) in listOf("mangle" to CHAIN, "filter" to AppConfig.ROOT_V6_CHAIN,
+                "filter" to AppConfig.ROOT_V6_FWD_CHAIN, "mangle" to AppConfig.ROOT_V6_PRE_CHAIN)) {
+                // Android kernels without IPv6 netfilter cannot create these chains. Remove
+                // this fallback when IPv6 netfilter is required on every supported root device.
+                appendLine("if rules=\$(ip6tables -t $table -S 2>/dev/null); then")
+                appendLine("  printf '%s\\n' \"\$rules\" | grep -q '$chain' && exit 1")
+                appendLine("fi")
+            }
+            for (family in listOf("", "-6 ")) {
+                appendLine("rules=\$(ip ${family}rule show 2>/dev/null) || exit 1")
+                appendLine("printf '%s\\n' \"\$rules\" | grep -Eq '^$PRIORITY:.*lookup[[:space:]]+$TABLE([[:space:]]|$)' && exit 1")
+            }
+            appendLine("exit 0")
         }
     }
 }
+
+internal fun String.toSingleQuotedYamlScalar(): String = "'${replace("'", "''")}'"

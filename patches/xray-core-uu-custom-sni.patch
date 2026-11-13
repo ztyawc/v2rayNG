@@ -1,0 +1,1189 @@
+diff --git a/infra/conf/uusni.go b/infra/conf/uusni.go
+new file mode 100644
+index 0000000..c42adaa
+--- /dev/null
++++ b/infra/conf/uusni.go
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: MPL-2.0
++package conf
++
++import (
++	"errors"
++	"github.com/xtls/xray-core/proxy/uusni"
++	"google.golang.org/protobuf/proto"
++)
++
++type UuSniConfig struct {
++	Address  string  `json:"address"`
++	Port     uint32  `json:"port"`
++	ObfsKey  *uint32 `json:"obfsKey"`
++	SniCrypt *bool   `json:"sniCrypt"`
++	Level    uint32  `json:"level"`
++}
++
++func (c *UuSniConfig) Build() (proto.Message, error) {
++	if c.ObfsKey == nil || c.SniCrypt == nil {
++		return nil, errors.New("uusni: obfsKey and sniCrypt must be provided explicitly")
++	}
++	out := &uusni.Config{Address: c.Address, Port: c.Port, ObfsKey: *c.ObfsKey, SniCrypt: *c.SniCrypt, Level: c.Level}
++	return out, uusni.Validate(out)
++}
+diff --git a/infra/conf/uusni_test.go b/infra/conf/uusni_test.go
+new file mode 100644
+index 0000000..bd0b1b0
+--- /dev/null
++++ b/infra/conf/uusni_test.go
+@@ -0,0 +1,199 @@
++// SPDX-License-Identifier: MPL-2.0
++package conf_test
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"crypto/aes"
++	"crypto/cipher"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/binary"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/infra/conf"
++	_ "github.com/xtls/xray-core/main/distro/all"
++	"github.com/xtls/xray-core/proxy/uusni"
++)
++
++func TestUuSniConfigRequiresExplicitParameters(t *testing.T) {
++	for _, body := range []string{
++		`{"address":"203.0.113.10","port":5556,"obfsKey":0,"sniCrypt":false}`,
++		`{"address":"203.0.113.10","port":5556,"obfsKey":255,"sniCrypt":true}`,
++	} {
++		var c conf.UuSniConfig
++		if err := json.Unmarshal([]byte(body), &c); err != nil {
++			t.Fatal(err)
++		}
++		out, err := c.Build()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if out.(*uusni.Config).Address != "203.0.113.10" {
++			t.Fatal("address lost")
++		}
++	}
++	for _, body := range []string{
++		`{}`, `{"address":"203.0.113.10","port":5556,"sniCrypt":true}`,
++		`{"address":"203.0.113.10","port":5556,"obfsKey":0}`,
++		`{"address":"203.0.113.10","port":65536,"obfsKey":77,"sniCrypt":true}`,
++		`{"address":"203.0.113.10","port":5556,"obfsKey":256,"sniCrypt":true}`,
++		`{"address":"203.0.113.10","port":5556,"obfsKey":-1,"sniCrypt":true}`,
++		`{"address":"node.test","port":5556,"obfsKey":77,"sniCrypt":true}`,
++	} {
++		var c conf.UuSniConfig
++		err := json.Unmarshal([]byte(body), &c)
++		if err == nil {
++			_, err = c.Build()
++		}
++		if err == nil {
++			t.Fatalf("invalid config accepted: %s", body)
++		}
++	}
++}
++
++type mockXor struct{ net.Conn }
++
++func (c mockXor) Read(p []byte) (int, error) {
++	n, e := c.Conn.Read(p)
++	for i := 0; i < n; i++ {
++		p[i] ^= 77
++	}
++	return n, e
++}
++func (c mockXor) Write(p []byte) (int, error) {
++	b := bytes.Clone(p)
++	for i := range b {
++		b[i] ^= 77
++	}
++	return c.Conn.Write(b)
++}
++
++// Exercises JSON/protobuf registration, the native outbound factory, core
++// dispatch, independently decoded SNI framing, verified TLS and an HTTP body.
++// This uses a local mock node, not the user's real account/node parameters.
++func TestUuSniCoreVerifiedTLS(t *testing.T) {
++	website := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "native-uusni-body") }))
++	defer website.Close()
++	node, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer node.Close()
++	port := node.Addr().(*net.TCPAddr).Port
++	nodeDone := make(chan error, 1)
++	go func() {
++		conn, err := node.Accept()
++		if err != nil {
++			nodeDone <- err
++			return
++		}
++		defer conn.Close()
++		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
++		s := mockXor{conn}
++		var h [7]byte
++		if _, err = io.ReadFull(s, h[:]); err != nil {
++			nodeDone <- err
++			return
++		}
++		if !bytes.Equal(h[:4], []byte{'U', 'U', 1, 1}) || binary.BigEndian.Uint16(h[4:6]) != 443 {
++			nodeDone <- fmt.Errorf("wrong SNI prefix")
++			return
++		}
++		b := make([]byte, int(h[6]))
++		if _, err = io.ReadFull(s, b); err != nil {
++			nodeDone <- err
++			return
++		}
++		if len(b) < 33 || b[0] != 16 || !bytes.Equal(b[1:17], make([]byte, 16)) {
++			nodeDone <- fmt.Errorf("wrong GCM blob")
++			return
++		}
++		key := []byte(fmt.Sprintf("127.0.0.1:%dUUUUUUUUUUUUUUUU", port))[:16]
++		block, _ := aes.NewCipher(key)
++		aead, _ := cipher.NewGCMWithNonceSize(block, 16)
++		host, err := aead.Open(nil, b[1:17], b[17:], nil)
++		if err != nil || string(host) != "example.com" {
++			nodeDone <- fmt.Errorf("target host decrypt: %v", err)
++			return
++		}
++		up, err := net.Dial("tcp", website.Listener.Addr().String())
++		if err != nil {
++			nodeDone <- err
++			return
++		}
++		defer up.Close()
++		finished := make(chan struct{})
++		go func() { defer close(finished); _, _ = io.Copy(up, s); _ = up.Close() }()
++		_, err = io.Copy(s, up)
++		_ = conn.Close()
++		<-finished
++		nodeDone <- err
++	}()
++	body := fmt.Sprintf(`{"log":{"loglevel":"none"},"outbounds":[{"tag":"proxy","protocol":"uusni","settings":{"address":"127.0.0.1","port":%d,"obfsKey":77,"sniCrypt":true},"mux":{"enabled":false,"concurrency":-1}}]}`, port)
++	var config conf.Config
++	if err = json.Unmarshal([]byte(body), &config); err != nil {
++		t.Fatal(err)
++	}
++	compiled, err := config.Build()
++	if err != nil {
++		t.Fatal(err)
++	}
++	instance, err := core.New(compiled)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer instance.Close()
++	if err = instance.Start(); err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	conn, err := core.Dial(ctx, instance, xnet.TCPDestination(xnet.DomainAddress("example.com"), 443))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
++	roots := x509.NewCertPool()
++	roots.AddCert(website.Certificate())
++	tlsConn := tls.Client(conn, &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12})
++	defer tlsConn.Close()
++	if err = tlsConn.HandshakeContext(ctx); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = io.WriteString(tlsConn, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"); err != nil {
++		t.Fatal(err)
++	}
++	response, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer response.Body.Close()
++	got, err := io.ReadAll(response.Body)
++	if err != nil || response.StatusCode != 200 || string(got) != "native-uusni-body" {
++		t.Fatal(response.StatusCode, string(got), err)
++	}
++	_ = tlsConn.Close()
++	select {
++	case err = <-nodeDone:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-ctx.Done():
++		t.Fatal("mock node did not terminate")
++	}
++	if err = instance.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/infra/conf/xray.go b/infra/conf/xray.go
+index f8f3e0c..c748e69 100644
+--- a/infra/conf/xray.go
++++ b/infra/conf/xray.go
+@@ -46,0 +47 @@ var (
++		"uusni":       func() interface{} { return new(UuSniConfig) },
+diff --git a/main/distro/all/all.go b/main/distro/all/all.go
+index 67bb9f2..ca698f6 100644
+--- a/main/distro/all/all.go
++++ b/main/distro/all/all.go
+@@ -46,0 +47 @@ import (
++	_ "github.com/xtls/xray-core/proxy/uusni"
+diff --git a/proxy/uusni/client.go b/proxy/uusni/client.go
+new file mode 100644
+index 0000000..f5f152a
+--- /dev/null
++++ b/proxy/uusni/client.go
+@@ -0,0 +1,183 @@
++// SPDX-License-Identifier: MPL-2.0
++package uusni
++
++import (
++	"context"
++	"errors"
++	"net"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/common/signal"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/features/policy"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/stat"
++)
++
++// Client owns only in-flight TCP flows. There is no account/control connection,
++// listener, token refresh or SProxy/direct fallback. Close joins active flows.
++type Client struct {
++	config   *Config
++	policy   policy.Manager
++	mu       sync.Mutex
++	closed   bool
++	requests map[context.Context]context.CancelFunc
++	workers  sync.WaitGroup
++}
++
++func (c *Client) own(parent context.Context) (context.Context, func(), error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.closed {
++		return nil, nil, net.ErrClosed
++	}
++	ctx, cancel := context.WithCancel(parent)
++	if c.requests == nil {
++		c.requests = make(map[context.Context]context.CancelFunc)
++	}
++	c.requests[ctx] = cancel
++	c.workers.Add(1)
++	return ctx, func() {
++		cancel()
++		c.mu.Lock()
++		delete(c.requests, ctx)
++		c.mu.Unlock()
++		c.workers.Done()
++	}, nil
++}
++
++func (c *Client) Close() error {
++	c.mu.Lock()
++	c.closed = true
++	for _, cancel := range c.requests {
++		cancel()
++	}
++	c.mu.Unlock()
++	c.workers.Wait()
++	return nil
++}
++
++func (c *Client) Process(parent context.Context, link *transport.Link, dialer internet.Dialer) error {
++	obs := session.OutboundsFromContext(parent)
++	if len(obs) == 0 || !obs[len(obs)-1].Target.IsValid() {
++		return errors.New("uusni: target not specified")
++	}
++	ob := obs[len(obs)-1]
++	target := ob.Target
++	if target.Network != xnet.Network_TCP || target.Address.Family().IsIPv6() {
++		return errors.New("uusni: only TCP DNS-name/IPv4 targets are supported")
++	}
++	header, err := Header(c.config, target.Address.String(), uint16(target.Port))
++	if err != nil {
++		return err
++	}
++	ob.Name = "uusni"
++	ob.CanSpliceCopy = 3 // All bytes must pass through XOR, including native splice paths.
++	ctx, finish, err := c.own(parent)
++	if err != nil {
++		return err
++	}
++	defer finish()
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	p := c.policy.ForLevel(c.config.Level)
++	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
++	defer timer.SetTimeout(0)
++	ctx = policy.ContextWithBufferPolicy(ctx, p.Buffer)
++	stopInput := context.AfterFunc(ctx, func() { _ = common.Interrupt(link.Reader) })
++	defer stopInput()
++
++	// Use the core dialer so Android protection, statistics and configured chaining
++	// remain owned by Xray. No standalone system dial or local HTTP proxy is used.
++	node := xnet.TCPDestination(xnet.ParseAddress(c.config.Address), xnet.Port(c.config.Port))
++	conn, err := dialer.Dial(ctx, node)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++	stopSocket := context.AfterFunc(ctx, func() { _ = conn.Close() })
++	defer stopSocket()
++	deadline := time.Now().Add(p.Timeouts.Handshake)
++	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
++		deadline = d
++	}
++	if err := conn.SetWriteDeadline(deadline); err != nil {
++		return err
++	}
++	if err := writeFull(conn, header); err != nil {
++		return err
++	}
++	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
++		return err
++	}
++	// No success ACK exists: the next bytes are already target TCP payload.
++	stream := &xorConn{Conn: conn, key: byte(c.config.ObfsKey)}
++	return relay(ctx, link, conn, func() error {
++		defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
++		if err := buf.Copy(link.Reader, buf.NewWriter(stream), buf.UpdateActivity(timer)); err != nil {
++			return err
++		}
++		if half, ok := stat.TryUnwrapStatsConn(conn).(interface{ CloseWrite() error }); ok {
++			return half.CloseWrite()
++		}
++		return nil // Non-TCP chained transports finish by downlink/idle timeout.
++	}, func() error {
++		defer timer.SetTimeout(p.Timeouts.UplinkOnly)
++		return buf.Copy(buf.NewReader(stream), link.Writer, buf.UpdateActivity(timer))
++	})
++}
++
++func relay(ctx context.Context, link *transport.Link, conn net.Conn, up, down func() error) error {
++	var workers sync.WaitGroup
++	var responseDelivered atomic.Bool
++	results := make(chan error, 2)
++	defer func() {
++		_ = conn.Close()
++		_ = common.Interrupt(link.Reader)
++		if !responseDelivered.Load() {
++			_ = common.Interrupt(link.Writer)
++		}
++		workers.Wait()
++	}()
++	workers.Add(2)
++	go func() { defer workers.Done(); results <- up() }()
++	go func() {
++		defer workers.Done()
++		err := down()
++		if err == nil {
++			responseDelivered.Store(true)
++			err = common.Close(link.Writer)
++		}
++		results <- err
++	}()
++	for range 2 {
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case err := <-results:
++			if err != nil {
++				return err
++			}
++		}
++	}
++	return nil
++}
++
++func init() {
++	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, raw interface{}) (interface{}, error) {
++		config := raw.(*Config)
++		if err := Validate(config); err != nil {
++			return nil, err
++		}
++		c := &Client{config: config}
++		err := core.RequireFeatures(ctx, func(pm policy.Manager) error { c.policy = pm; return nil })
++		return c, err
++	}))
++}
+diff --git a/proxy/uusni/client_test.go b/proxy/uusni/client_test.go
+new file mode 100644
+index 0000000..3c15dce
+--- /dev/null
++++ b/proxy/uusni/client_test.go
+@@ -0,0 +1,272 @@
++// SPDX-License-Identifier: MPL-2.0
++package uusni
++
++import (
++	"bytes"
++	"context"
++	"crypto/aes"
++	"crypto/cipher"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"strconv"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/features/policy"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	"github.com/xtls/xray-core/transport/pipe"
++)
++
++type testPolicy struct{}
++
++func (testPolicy) Type() interface{}              { return policy.ManagerType() }
++func (testPolicy) Start() error                   { return nil }
++func (testPolicy) Close() error                   { return nil }
++func (testPolicy) ForLevel(uint32) policy.Session { return policy.SessionDefault() }
++func (testPolicy) ForSystem() policy.System       { return policy.System{} }
++
++type testDialer struct {
++	calls atomic.Int32
++	work  func(context.Context, xnet.Destination) (stat.Connection, error)
++}
++
++func (d *testDialer) Dial(ctx context.Context, dest xnet.Destination) (stat.Connection, error) {
++	d.calls.Add(1)
++	return d.work(ctx, dest)
++}
++func (*testDialer) DestIpAddress() xnet.IP                                { return nil }
++func (*testDialer) SetOutboundGateway(context.Context, *session.Outbound) {}
++
++func testContext(target xnet.Destination) context.Context {
++	return session.ContextWithOutbounds(context.Background(), []*session.Outbound{{Target: target, Tag: "synthetic-test"}})
++}
++
++func testLink() (*transport.Link, *pipe.Writer, *pipe.Reader) {
++	ur, uw := pipe.New()
++	dr, dw := pipe.New()
++	return &transport.Link{Reader: ur, Writer: dw}, uw, dr
++}
++
++// Independent mock decoder: it never calls Header/addressKey/xor/xorConn.
++func readMockHeader(conn net.Conn, c *Config) (string, uint16, error) {
++	var prefix [7]byte
++	if _, err := io.ReadFull(conn, prefix[:]); err != nil {
++		return "", 0, err
++	}
++	for i := range prefix {
++		prefix[i] ^= byte(c.ObfsKey)
++	}
++	if string(prefix[:3]) != "UU\x01" || prefix[3] > 1 {
++		return "", 0, errors.New("wrong whole-header XOR or magic")
++	}
++	field := make([]byte, int(prefix[6]))
++	if _, err := io.ReadFull(conn, field); err != nil {
++		return "", 0, err
++	}
++	for i := range field {
++		field[i] ^= byte(c.ObfsKey)
++	}
++	if prefix[3] == 1 {
++		if len(field) < 33 || field[0] != 16 || !bytes.Equal(field[1:17], make([]byte, 16)) {
++			return "", 0, errors.New("wrong native IV")
++		}
++		seed := []byte(c.Address + ":" + strconv.Itoa(int(c.Port)))
++		for len(seed) < 16 {
++			seed = append(seed, 'U')
++		}
++		block, err := aes.NewCipher(seed[:16])
++		if err != nil {
++			return "", 0, err
++		}
++		aead, err := cipher.NewGCMWithNonceSize(block, 16)
++		if err != nil {
++			return "", 0, err
++		}
++		field, err = aead.Open(nil, field[1:17], field[17:], nil)
++		if err != nil {
++			return "", 0, err
++		}
++	}
++	return string(field), binary.BigEndian.Uint16(prefix[4:6]), nil
++}
++
++func TestProcessNoAckBidirectionalAndHalfClose(t *testing.T) {
++	for _, crypt := range []bool{false, true} {
++		t.Run(fmt.Sprint(crypt), func(t *testing.T) {
++			listener, err := net.Listen("tcp4", "127.0.0.1:0")
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer listener.Close()
++			c := &Config{Address: "127.0.0.1", Port: uint32(listener.Addr().(*net.TCPAddr).Port), ObfsKey: 77, SniCrypt: crypt}
++			serverDone := make(chan error, 1)
++			payload := bytes.Repeat([]byte("client payload\x00\xff"), 3000)
++			go func() {
++				conn, err := listener.Accept()
++				if err != nil {
++					serverDone <- err
++					return
++				}
++				defer conn.Close()
++				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
++				host, port, err := readMockHeader(conn, c)
++				if err != nil {
++					serverDone <- err
++					return
++				}
++				if host != "example.com" || port != 80 {
++					serverDone <- errors.New("target changed")
++					return
++				}
++				// Banner is target data, not a handshake ACK. A client waiting for an
++				// invented ACK will lose this data or deadlock before upload starts.
++				banner := []byte("BANNER")
++				for i := range banner {
++					banner[i] ^= 77
++				}
++				if _, err = conn.Write(banner); err != nil {
++					serverDone <- err
++					return
++				}
++				body, err := io.ReadAll(conn)
++				if err != nil {
++					serverDone <- err
++					return
++				}
++				for i := range body {
++					body[i] ^= 77
++				}
++				if !bytes.Equal(body, payload) {
++					serverDone <- errors.New("upload corrupted")
++					return
++				}
++				reply := []byte("REPLY AFTER FIN")
++				for i := range reply {
++					reply[i] ^= 77
++				}
++				_, err = conn.Write(reply)
++				serverDone <- err
++			}()
++			dialer := &testDialer{work: func(ctx context.Context, dest xnet.Destination) (stat.Connection, error) {
++				if dest.Network != xnet.Network_TCP || dest.Address.String() != c.Address || uint32(dest.Port) != c.Port {
++					return nil, errors.New("wrong node")
++				}
++				return (&net.Dialer{}).DialContext(ctx, "tcp4", listener.Addr().String())
++			}}
++			client := &Client{config: c, policy: testPolicy{}}
++			defer client.Close()
++			link, upload, download := testLink()
++			defer upload.Close()
++			defer download.Interrupt()
++			done := make(chan error, 1)
++			go func() {
++				done <- client.Process(testContext(xnet.TCPDestination(xnet.DomainAddress("example.com"), 80)), link, dialer)
++			}()
++			reader := &buf.BufferedReader{Reader: download}
++			banner := make([]byte, 6)
++			if _, err = io.ReadFull(reader, banner); err != nil || string(banner) != "BANNER" {
++				t.Fatal("banner/ACK handling", err)
++			}
++			if err = upload.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(payload)}); err != nil {
++				t.Fatal(err)
++			}
++			_ = upload.Close()
++			reply, err := io.ReadAll(reader)
++			if err != nil || string(reply) != "REPLY AFTER FIN" {
++				t.Fatal("half close lost response", string(reply), err)
++			}
++			select {
++			case err = <-done:
++				if err != nil {
++					t.Fatal(err)
++				}
++			case <-time.After(5 * time.Second):
++				t.Fatal("Process did not join")
++			}
++			if err = <-serverDone; err != nil {
++				t.Fatal(err)
++			}
++			if dialer.calls.Load() != 1 {
++				t.Fatal("unexpected retry/fallback")
++			}
++		})
++	}
++}
++
++func TestRejectUnsupportedTargetsWithoutDial(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	defer client.Close()
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) {
++		return nil, errors.New("unexpected dial")
++	}}
++	for _, target := range []xnet.Destination{xnet.UDPDestination(xnet.DomainAddress("example.com"), 53), xnet.TCPDestination(xnet.ParseAddress("::1"), 443), xnet.TCPDestination(xnet.DomainAddress("bad/host"), 443)} {
++		link, up, down := testLink()
++		if client.Process(testContext(target), link, dialer) == nil {
++			t.Fatal("unsupported target accepted")
++		}
++		up.Close()
++		down.Interrupt()
++	}
++	if dialer.calls.Load() != 0 {
++		t.Fatal("unsupported target caused network traffic")
++	}
++}
++
++func TestCloseCancelsBlockedHeaderAndRejectsNewFlows(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	peer, local := net.Pipe()
++	defer peer.Close()
++	entered := make(chan struct{})
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) { close(entered); return local, nil }}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	done := make(chan error, 1)
++	go func() {
++		done <- client.Process(testContext(xnet.TCPDestination(xnet.DomainAddress("example.com"), 443)), link, dialer)
++	}()
++	<-entered
++	closed := make(chan struct{})
++	go func() { client.Close(); client.Close(); close(closed) }()
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("Close did not cancel blocked handshake")
++	}
++	if err := <-done; err == nil {
++		t.Fatal("cancelled handshake reported success")
++	}
++	link2, up2, down2 := testLink()
++	defer up2.Close()
++	defer down2.Interrupt()
++	if err := client.Process(testContext(xnet.TCPDestination(xnet.DomainAddress("example.com"), 443)), link2, dialer); !errors.Is(err, net.ErrClosed) {
++		t.Fatal("closed outbound admitted flow", err)
++	}
++	if dialer.calls.Load() != 1 {
++		t.Fatal("cancel caused retry/fallback")
++	}
++}
++
++func TestDialFailureDoesNotFallback(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	defer client.Close()
++	rejected := errors.New("synthetic dial failure")
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) { return nil, rejected }}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	if err := client.Process(testContext(xnet.TCPDestination(xnet.DomainAddress("example.com"), 443)), link, dialer); !errors.Is(err, rejected) {
++		t.Fatal(err)
++	}
++	if dialer.calls.Load() != 1 {
++		t.Fatal("failed node used fallback")
++	}
++}
+diff --git a/proxy/uusni/config.pb.go b/proxy/uusni/config.pb.go
+new file mode 100644
+index 0000000..0202fad
+--- /dev/null
++++ b/proxy/uusni/config.pb.go
+@@ -0,0 +1,158 @@
++// Code generated by protoc-gen-go. DO NOT EDIT.
++// versions:
++// 	protoc-gen-go v1.36.11
++// 	protoc        v6.33.6
++// source: proxy/uusni/config.proto
++
++package uusni
++
++import (
++	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
++	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
++	reflect "reflect"
++	sync "sync"
++	unsafe "unsafe"
++)
++
++const (
++	// Verify that this generated code is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
++	// Verify that runtime/protoimpl is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
++)
++
++type Config struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
++	Port          uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
++	ObfsKey       uint32                 `protobuf:"varint,3,opt,name=obfs_key,json=obfsKey,proto3" json:"obfs_key,omitempty"`
++	SniCrypt      bool                   `protobuf:"varint,4,opt,name=sni_crypt,json=sniCrypt,proto3" json:"sni_crypt,omitempty"`
++	Level         uint32                 `protobuf:"varint,5,opt,name=level,proto3" json:"level,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *Config) Reset() {
++	*x = Config{}
++	mi := &file_proxy_uusni_config_proto_msgTypes[0]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *Config) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*Config) ProtoMessage() {}
++
++func (x *Config) ProtoReflect() protoreflect.Message {
++	mi := &file_proxy_uusni_config_proto_msgTypes[0]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use Config.ProtoReflect.Descriptor instead.
++func (*Config) Descriptor() ([]byte, []int) {
++	return file_proxy_uusni_config_proto_rawDescGZIP(), []int{0}
++}
++
++func (x *Config) GetAddress() string {
++	if x != nil {
++		return x.Address
++	}
++	return ""
++}
++
++func (x *Config) GetPort() uint32 {
++	if x != nil {
++		return x.Port
++	}
++	return 0
++}
++
++func (x *Config) GetObfsKey() uint32 {
++	if x != nil {
++		return x.ObfsKey
++	}
++	return 0
++}
++
++func (x *Config) GetSniCrypt() bool {
++	if x != nil {
++		return x.SniCrypt
++	}
++	return false
++}
++
++func (x *Config) GetLevel() uint32 {
++	if x != nil {
++		return x.Level
++	}
++	return 0
++}
++
++var File_proxy_uusni_config_proto protoreflect.FileDescriptor
++
++const file_proxy_uusni_config_proto_rawDesc = "" +
++	"\n" +
++	"\x18proxy/uusni/config.proto\x12\x10xray.proxy.uusni\"\x84\x01\n" +
++	"\x06Config\x12\x18\n" +
++	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
++	"\x04port\x18\x02 \x01(\rR\x04port\x12\x19\n" +
++	"\bobfs_key\x18\x03 \x01(\rR\aobfsKey\x12\x1b\n" +
++	"\tsni_crypt\x18\x04 \x01(\bR\bsniCrypt\x12\x14\n" +
++	"\x05level\x18\x05 \x01(\rR\x05levelB'Z%github.com/xtls/xray-core/proxy/uusnib\x06proto3"
++
++var (
++	file_proxy_uusni_config_proto_rawDescOnce sync.Once
++	file_proxy_uusni_config_proto_rawDescData []byte
++)
++
++func file_proxy_uusni_config_proto_rawDescGZIP() []byte {
++	file_proxy_uusni_config_proto_rawDescOnce.Do(func() {
++		file_proxy_uusni_config_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proxy_uusni_config_proto_rawDesc), len(file_proxy_uusni_config_proto_rawDesc)))
++	})
++	return file_proxy_uusni_config_proto_rawDescData
++}
++
++var file_proxy_uusni_config_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
++var file_proxy_uusni_config_proto_goTypes = []any{
++	(*Config)(nil), // 0: xray.proxy.uusni.Config
++}
++var file_proxy_uusni_config_proto_depIdxs = []int32{
++	0, // [0:0] is the sub-list for method output_type
++	0, // [0:0] is the sub-list for method input_type
++	0, // [0:0] is the sub-list for extension type_name
++	0, // [0:0] is the sub-list for extension extendee
++	0, // [0:0] is the sub-list for field type_name
++}
++
++func init() { file_proxy_uusni_config_proto_init() }
++func file_proxy_uusni_config_proto_init() {
++	if File_proxy_uusni_config_proto != nil {
++		return
++	}
++	type x struct{}
++	out := protoimpl.TypeBuilder{
++		File: protoimpl.DescBuilder{
++			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
++			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proxy_uusni_config_proto_rawDesc), len(file_proxy_uusni_config_proto_rawDesc)),
++			NumEnums:      0,
++			NumMessages:   1,
++			NumExtensions: 0,
++			NumServices:   0,
++		},
++		GoTypes:           file_proxy_uusni_config_proto_goTypes,
++		DependencyIndexes: file_proxy_uusni_config_proto_depIdxs,
++		MessageInfos:      file_proxy_uusni_config_proto_msgTypes,
++	}.Build()
++	File_proxy_uusni_config_proto = out.File
++	file_proxy_uusni_config_proto_goTypes = nil
++	file_proxy_uusni_config_proto_depIdxs = nil
++}
+diff --git a/proxy/uusni/config.proto b/proxy/uusni/config.proto
+new file mode 100644
+index 0000000..db8b53d
+--- /dev/null
++++ b/proxy/uusni/config.proto
+@@ -0,0 +1,11 @@
++syntax = "proto3";
++package xray.proxy.uusni;
++option go_package = "github.com/xtls/xray-core/proxy/uusni";
++
++message Config {
++  string address = 1;
++  uint32 port = 2;
++  uint32 obfs_key = 3;
++  bool sni_crypt = 4;
++  uint32 level = 5;
++}
+diff --git a/proxy/uusni/wire.go b/proxy/uusni/wire.go
+new file mode 100644
+index 0000000..5584ef6
+--- /dev/null
++++ b/proxy/uusni/wire.go
+@@ -0,0 +1,157 @@
++// SPDX-License-Identifier: MPL-2.0
++// UU 11.3.5 custom-SNI TCP, without outer TLS. See docs/uu-sni.md in the app.
++package uusni
++
++import (
++	"crypto/aes"
++	"crypto/cipher"
++	"encoding/binary"
++	"errors"
++	"io"
++	"net"
++	"net/netip"
++	"strconv"
++	"strings"
++)
++
++func Validate(c *Config) error {
++	if c == nil || c.Port == 0 || c.Port > 65535 || c.ObfsKey > 255 {
++		return errors.New("uusni: valid port and unsigned XOR byte required")
++	}
++	ip, err := netip.ParseAddr(c.Address)
++	if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.As4()[0] >= 224 {
++		return errors.New("uusni: a numeric IPv4 node is required")
++	}
++	return nil
++}
++
++func addressKey(c *Config) [16]byte {
++	key := [16]byte{'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U', 'U'}
++	copy(key[:], c.Address+":"+strconv.FormatUint(uint64(c.Port), 10))
++	return key
++}
++
++func validHost(host string) bool {
++	if len(host) == 0 || len(host) > 253 {
++		return false
++	}
++	for _, label := range strings.Split(host, ".") {
++		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
++			return false
++		}
++		for i := range label {
++			b := label[i]
++			if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-') {
++				return false
++			}
++		}
++	}
++	return true
++}
++
++// Header already includes XOR over the ENTIRE header, not just the host blob.
++// The target port is preserved; this branch does not rewrite port 80 to 443.
++func Header(c *Config, host string, port uint16) ([]byte, error) {
++	if err := Validate(c); err != nil {
++		return nil, err
++	}
++	if port == 0 || !validHost(host) {
++		return nil, errors.New("uusni: invalid ASCII hostname/IPv4 target or port")
++	}
++	field := []byte(host)
++	flag := byte(0)
++	if c.SniCrypt {
++		// Native compatibility: AES-128-GCM, 16 ZERO IV bytes, empty AAD,
++		// and a 16-byte trailing tag. This fixed IV is not a safe new protocol design.
++		if len(field) > 222 {
++			return nil, errors.New("uusni: encrypted target exceeds one-byte field length")
++		}
++		key := addressKey(c)
++		block, err := aes.NewCipher(key[:])
++		if err != nil {
++			return nil, err
++		}
++		gcm, err := cipher.NewGCMWithNonceSize(block, 16)
++		if err != nil {
++			return nil, err
++		}
++		iv := make([]byte, 16)
++		blob := append([]byte{16}, iv...)
++		field = gcm.Seal(blob, iv, field, nil)
++		flag = 1
++	}
++	if len(field) > 255 {
++		return nil, errors.New("uusni: target field length overflow")
++	}
++	header := make([]byte, 7, 7+len(field))
++	copy(header, []byte{'U', 'U', 1, flag})
++	binary.BigEndian.PutUint16(header[4:6], port)
++	header[6] = byte(len(field))
++	header = append(header, field...)
++	xor(header, byte(c.ObfsKey))
++	return header, nil
++}
++
++func xor(data []byte, key byte) {
++	for i := range data {
++		data[i] ^= key
++	}
++}
++
++func writeFull(w io.Writer, data []byte) error {
++	for len(data) > 0 {
++		n, err := w.Write(data)
++		if n < 0 || n > len(data) {
++			return io.ErrShortWrite
++		}
++		data = data[n:]
++		if err != nil {
++			return err
++		}
++		if n == 0 {
++			return io.ErrShortWrite
++		}
++	}
++	return nil
++}
++
++// No ReaderFrom/WriterTo: kernel splice must never bypass the XOR operation.
++type xorConn struct {
++	net.Conn
++	key byte
++}
++
++func (c *xorConn) Read(p []byte) (int, error) {
++	n, err := c.Conn.Read(p)
++	if n > 0 {
++		xor(p[:n], c.key)
++	}
++	return n, err
++}
++
++func (c *xorConn) Write(p []byte) (int, error) {
++	// Do not mutate caller buffers. Bound temporary storage for large writes.
++	total := 0
++	chunk := make([]byte, min(len(p), 32*1024))
++	for len(p) > 0 {
++		n := copy(chunk, p)
++		xor(chunk[:n], c.key)
++		written := 0
++		for written < n {
++			count, err := c.Conn.Write(chunk[written:n])
++			if count < 0 || count > n-written {
++				return total + written, io.ErrShortWrite
++			}
++			written += count
++			if err != nil {
++				return total + written, err
++			}
++			if count == 0 {
++				return total + written, io.ErrShortWrite
++			}
++		}
++		total += n
++		p = p[n:]
++	}
++	return total, nil
++}
+diff --git a/proxy/uusni/wire_test.go b/proxy/uusni/wire_test.go
+new file mode 100644
+index 0000000..1e5e861
+--- /dev/null
++++ b/proxy/uusni/wire_test.go
+@@ -0,0 +1,125 @@
++// SPDX-License-Identifier: MPL-2.0
++package uusni
++
++import (
++	"bytes"
++	"encoding/hex"
++	"errors"
++	"io"
++	"net"
++	"strings"
++	"testing"
++)
++
++func fixture() *Config {
++	return &Config{Address: "203.0.113.10", Port: 5556, ObfsKey: 77, SniCrypt: true}
++}
++
++func TestHeaderIndependentVectors(t *testing.T) {
++	c := fixture()
++	got, err := Header(c, "example.com", 443)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Independently checked with Python/OpenSSL and C libmbedcrypto, not a
++	// round trip through a second copy of this Go encoder. All parameters synthetic.
++	clear, _ := hex.DecodeString("5555010101bb2c1000000000000000000000000000000000f174c41f691bd3bbcdacc5f0c241967be9b39b10be5f6f914f6d76")
++	if len(got) != len(clear) {
++		t.Fatalf("length %d != %d", len(got), len(clear))
++	}
++	for i := range got {
++		if got[i] != clear[i]^77 {
++			t.Fatalf("wire mismatch at %d", i)
++		}
++	}
++	c.SniCrypt, c.ObfsKey = false, 0
++	got, err = Header(c, "example.com", 80)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if hex.EncodeToString(got) != "5555010000500b6578616d706c652e636f6d" {
++		t.Fatal("target port 80 or clear header changed")
++	}
++}
++
++func TestKeyAndLengthBoundaries(t *testing.T) {
++	c := fixture()
++	key := addressKey(c)
++	if string(key[:]) != "203.0.113.10:555" {
++		t.Fatal("long endpoint not truncated")
++	}
++	c.Address, c.Port = "1.2.3.4", 8
++	key = addressKey(c)
++	if string(key[:]) != "1.2.3.4:8UUUUUUU" {
++		t.Fatal("short endpoint not U-padded")
++	}
++	host := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 30)
++	if _, err := Header(c, host, 443); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := Header(c, host+"d", 443); err == nil {
++		t.Fatal("encrypted length wrapped")
++	}
++	for _, host := range []string{"", "bad\x00host", "a:b", "[::1]", "::1", "-bad.test", "bad..test", "a/host", "a@host", "域名.test", strings.Repeat("a", 64) + ".test"} {
++		if _, err := Header(c, host, 443); err == nil {
++			t.Fatalf("accepted invalid host %q", host)
++		}
++	}
++	for _, change := range []func(*Config){func(c *Config) { c.Port = 0 }, func(c *Config) { c.Port = 65536 }, func(c *Config) { c.ObfsKey = 256 }, func(c *Config) { c.Address = "node.test" }, func(c *Config) { c.Address = "::1" }, func(c *Config) { c.Address = "0.0.0.0" }, func(c *Config) { c.Address = "224.0.0.1" }} {
++		c := fixture()
++		change(c)
++		if Validate(c) == nil {
++			t.Fatal("accepted invalid node")
++		}
++	}
++}
++
++type shortConn struct {
++	net.Conn
++	bytes.Buffer
++	max  int
++	fail error
++	zero bool
++}
++
++func (c *shortConn) Write(p []byte) (int, error) {
++	if c.zero {
++		return 0, nil
++	}
++	n := min(len(p), c.max)
++	c.Buffer.Write(p[:n])
++	return n, c.fail
++}
++func (c *shortConn) Read(p []byte) (int, error) { return c.Buffer.Read(p) }
++
++func TestXorShortWritesKeepInputAndOffset(t *testing.T) {
++	plain := bytes.Repeat([]byte{0, 1, 2, 127, 128, 255}, 30000)
++	original := bytes.Clone(plain)
++	conn := &shortConn{max: 7}
++	x := &xorConn{Conn: conn, key: 77}
++	n, err := x.Write(plain)
++	if err != nil || n != len(plain) || !bytes.Equal(plain, original) {
++		t.Fatal("short write or caller-buffer mutation", n, err)
++	}
++	for i, b := range conn.Buffer.Bytes() {
++		if b != plain[i]^77 {
++			t.Fatal("XOR chunk offset changed")
++		}
++	}
++	got, err := io.ReadAll(x)
++	if err != nil || !bytes.Equal(got, plain) {
++		t.Fatal("read transform", err)
++	}
++	conn.zero = true
++	if _, err = x.Write([]byte("a")); !errors.Is(err, io.ErrShortWrite) {
++		t.Fatal("zero write was not rejected")
++	}
++	if err = writeFull(conn, []byte("a")); !errors.Is(err, io.ErrShortWrite) {
++		t.Fatal("header zero write was not rejected")
++	}
++	conn.zero = false
++	conn.fail = io.ErrClosedPipe
++	if n, err = x.Write([]byte("123456789")); n != 7 || !errors.Is(err, io.ErrClosedPipe) {
++		t.Fatal("partial error count", n, err)
++	}
++}

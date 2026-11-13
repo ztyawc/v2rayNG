@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI (TCP)</string>
+    <string name="menu_item_import_config_manually_uusni">وارد کردن دستی [UU SNI]</string>
+    <string name="uusni_obfs_key">مقدار پوشیده‌سازی (obfs_key، ۰–۲۵۵)</string>
+    <string name="uusni_crypt">رمز کردن نشانی مقصد (sni_crypt)</string>
+    <string name="uusni_hint">تنیا TCP. نشانی IPv4، درگاه و مقدار پوشیده‌سازی گره ره وارد کنین.</string>
+    <string name="uusni_invalid_config">یادداشت، IPv4 درست، درگاه ۱–۶۵۵۳۵ و مقدار پوشیده‌سازی ۰–۲۵۵ ره وارد کنین.</string>
+</resources>

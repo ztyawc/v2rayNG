@@ -1,0 +1,1621 @@
+diff --git a/infra/conf/vks6.go b/infra/conf/vks6.go
+new file mode 100644
+index 00000000..0e4cbacc
+--- /dev/null
++++ b/infra/conf/vks6.go
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: MPL-2.0
++package conf
++
++import (
++	"encoding/json"
++	"errors"
++	"strings"
++
++	"github.com/xtls/xray-core/app/proxyman"
++	"github.com/xtls/xray-core/proxy/vks6"
++	"github.com/xtls/xray-core/transport/internet"
++	"google.golang.org/protobuf/proto"
++)
++
++type VkS6Config struct {
++	Address  string  `json:"address"`
++	Port     uint32  `json:"port"`
++	PortEnd  *uint32 `json:"portEnd"`
++	Username string  `json:"username"`
++	Password string  `json:"password"`
++	Level    uint32  `json:"level"`
++	UDP      bool    `json:"udp"`
++	TLS      bool    `json:"tls"`
++	Network  string  `json:"network"`
++}
++
++func (c *VkS6Config) Build() (proto.Message, error) {
++	if c.UDP || c.TLS || c.Network != "" && c.Network != "tcp" {
++		return nil, errors.New("vks6: only plain TCP is supported")
++	}
++	end := c.Port
++	if c.PortEnd != nil {
++		end = *c.PortEnd
++		if end == 0 {
++			return nil, errors.New("vks6: portEnd must be a valid TCP port")
++		}
++	}
++	out := &vks6.Config{Address: c.Address, Port: c.Port, PortEnd: end,
++		Username: c.Username, Password: c.Password, Level: c.Level}
++	return out, vks6.Validate(out)
++}
++
++// Resolve through Xray's existing DNS owner (with FakeEnable=false), preserving
++// hosts, routing and Android socket protection. Never send a domain in S6 framing.
++func (c *OutboundDetourConfig) configureVkS6(sender *proxyman.SenderConfig) error {
++	if c.TargetStrategy != "" && !strings.EqualFold(c.TargetStrategy, "ForceIPv4") {
++		return errors.New("vks6: targetStrategy must be ForceIPv4")
++	}
++	sender.TargetStrategy = internet.DomainStrategy_FORCE_IP4
++	if sender.MultiplexSettings != nil && sender.MultiplexSettings.Enabled {
++		return errors.New("vks6: mux is not supported")
++	}
++	if stream := sender.StreamSettings; stream != nil {
++		if (stream.ProtocolName != "" && stream.ProtocolName != "tcp") || stream.SecurityType != "" {
++			return errors.New("vks6: only plain TCP transport is supported")
++		}
++	}
++	if source := c.StreamSetting; source != nil {
++		if source.FinalMask != nil {
++			return errors.New("vks6: outer masks are not supported")
++		}
++		for _, tcp := range []*TCPConfig{source.TCPSettings, source.RAWSettings} {
++			if tcp != nil && len(tcp.HeaderConfig) != 0 {
++				var header struct {
++					Type string `json:"type"`
++				}
++				if json.Unmarshal(tcp.HeaderConfig, &header) != nil || header.Type != "none" {
++					return errors.New("vks6: TCP header camouflage is not supported")
++				}
++			}
++		}
++	}
++	return nil
++}
+diff --git a/infra/conf/vks6_core_test.go b/infra/conf/vks6_core_test.go
+new file mode 100644
+index 00000000..365d6f5b
+--- /dev/null
++++ b/infra/conf/vks6_core_test.go
+@@ -0,0 +1,158 @@
++// SPDX-License-Identifier: MPL-2.0
++package conf_test
++
++import (
++	"bufio"
++	"bytes"
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/infra/conf"
++	_ "github.com/xtls/xray-core/main/distro/all"
++)
++
++type mockVkS6Xor struct{ net.Conn }
++
++func (c mockVkS6Xor) Read(p []byte) (int, error) {
++	n, e := c.Conn.Read(p)
++	for i := 0; i < n; i++ {
++		p[i] ^= 0x5a
++	}
++	return n, e
++}
++func (c mockVkS6Xor) Write(p []byte) (int, error) {
++	b := bytes.Clone(p)
++	for i := range b {
++		b[i] ^= 0x5a
++	}
++	return c.Conn.Write(b)
++}
++
++// Exercises JSON/protobuf registration, the native outbound factory, core
++// dispatch, independently decoded S6 framing, verified TLS and an HTTP body.
++// This uses a local mock node, not the user's real account/node parameters.
++func TestVkS6CoreDnsAndVerifiedTLS(t *testing.T) {
++	website := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "native-vks6-body") }))
++	defer website.Close()
++	node, err := net.Listen("tcp4", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer node.Close()
++	port := node.Addr().(*net.TCPAddr).Port
++	nodeDone := make(chan error, 1)
++	go func() {
++		conn, err := node.Accept()
++		if err != nil {
++			nodeDone <- err
++			return
++		}
++		defer conn.Close()
++		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
++		request := make([]byte, 34)
++		if _, err = io.ReadFull(conn, request); err != nil {
++			nodeDone <- err
++			return
++		}
++		// Published independent vector, with target TCP port 443 instead of 80.
++		if hex.EncodeToString(request) != "06074a4d6917295837100c177650781e7577041f25012f4f262609012bae663601bb" {
++			nodeDone <- fmt.Errorf("wrong S6 request or IPv4 DNS resolution")
++			return
++		}
++		if _, err = conn.Write([]byte{6, 0}); err != nil {
++			nodeDone <- err
++			return
++		}
++		s := mockVkS6Xor{conn}
++		up, err := net.Dial("tcp", website.Listener.Addr().String())
++		if err != nil {
++			nodeDone <- err
++			return
++		}
++		defer up.Close()
++		finished := make(chan struct{})
++		go func() {
++			defer close(finished)
++			_, _ = io.Copy(up, s)
++			// Upload EOF must still allow the TLS server to finish its response.
++			if tcp, ok := up.(*net.TCPConn); ok {
++				_ = tcp.CloseWrite()
++			}
++		}()
++		// The HTTP body and TLS verification are asserted by the client below.
++		// A peer reset after that client closes is normal mock teardown, not
++		// a payload assertion; FIN behavior is tested separately in proxy/vks6.
++		_, _ = io.Copy(s, up)
++		_ = conn.Close()
++		<-finished
++		nodeDone <- nil
++	}()
++	body := fmt.Sprintf(`{"log":{"loglevel":"none"},"dns":{"hosts":{"example.com":"43.174.102.54"}},"outbounds":[{"tag":"proxy","protocol":"vks6","settings":{"address":"127.0.0.1","port":%d,"username":"vk-test","password":"0123456789abcdef"},"mux":{"enabled":false,"concurrency":-1}}]}`, port)
++	var config conf.Config
++	if err = json.Unmarshal([]byte(body), &config); err != nil {
++		t.Fatal(err)
++	}
++	compiled, err := config.Build()
++	if err != nil {
++		t.Fatal(err)
++	}
++	instance, err := core.New(compiled)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer instance.Close()
++	if err = instance.Start(); err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	conn, err := core.Dial(ctx, instance, xnet.TCPDestination(xnet.DomainAddress("example.com"), 443))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
++	roots := x509.NewCertPool()
++	roots.AddCert(website.Certificate())
++	tlsConn := tls.Client(conn, &tls.Config{RootCAs: roots, ServerName: "example.com", MinVersion: tls.VersionTLS12})
++	defer tlsConn.Close()
++	if err = tlsConn.HandshakeContext(ctx); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = io.WriteString(tlsConn, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"); err != nil {
++		t.Fatal(err)
++	}
++	response, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer response.Body.Close()
++	got, err := io.ReadAll(response.Body)
++	if err != nil || response.StatusCode != 200 || string(got) != "native-vks6-body" {
++		t.Fatal(response.StatusCode, string(got), err)
++	}
++	_ = tlsConn.Close()
++	select {
++	case err = <-nodeDone:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-ctx.Done():
++		t.Fatal("mock node did not terminate")
++	}
++	if err = instance.Close(); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/infra/conf/vks6_test.go b/infra/conf/vks6_test.go
+new file mode 100644
+index 00000000..177d5169
+--- /dev/null
++++ b/infra/conf/vks6_test.go
+@@ -0,0 +1,147 @@
++// SPDX-License-Identifier: MPL-2.0
++package conf_test
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/xtls/xray-core/app/proxyman"
++	"github.com/xtls/xray-core/infra/conf"
++	"github.com/xtls/xray-core/proxy/vks6"
++	"github.com/xtls/xray-core/transport/internet"
++)
++
++func TestVkS6ConfigAndDefaultIpv4Resolution(t *testing.T) {
++	for _, ending := range []string{"", `,"portEnd":8150`} {
++		body := `{"protocol":"vks6","settings":{"address":"203.0.113.10","port":8050,"username":" vk-test ","password":" synthetic-secret "` + ending + `},"streamSettings":{"network":"tcp","tcpSettings":{"header":{ "type" : "none" }}}}`
++		var config conf.OutboundDetourConfig
++		if err := json.Unmarshal([]byte(body), &config); err != nil {
++			t.Fatal(err)
++		}
++		compiled, err := config.Build()
++		if err != nil {
++			t.Fatal(err)
++		}
++		proxy, err := compiled.ProxySettings.GetInstance()
++		if err != nil {
++			t.Fatal(err)
++		}
++		c := proxy.(*vks6.Config)
++		if c.Username != " vk-test " || c.Password != " synthetic-secret " {
++			t.Fatal("credential bytes changed")
++		}
++		if ending == "" && c.PortEnd != c.Port {
++			t.Fatal("fixed node port default lost")
++		}
++		if ending != "" && c.PortEnd != 8150 {
++			t.Fatal("port range lost")
++		}
++		sender, err := compiled.SenderSettings.GetInstance()
++		if err != nil || sender.(*proxyman.SenderConfig).TargetStrategy != internet.DomainStrategy_FORCE_IP4 {
++			t.Fatal("IPv4 DNS strategy missing", err)
++		}
++	}
++}
++
++func TestVkS6ConfigRejectsMissingInvalidAndUnsupportedParameters(t *testing.T) {
++	valid := map[string]any{"address": "203.0.113.10", "port": 8050, "username": "vk-test", "password": "synthetic-secret"}
++	for _, field := range []string{"address", "port", "username", "password"} {
++		m := make(map[string]any)
++		for k, v := range valid {
++			if k != field {
++				m[k] = v
++			}
++		}
++		body, _ := json.Marshal(m)
++		var c conf.VkS6Config
++		err := json.Unmarshal(body, &c)
++		if err == nil {
++			_, err = c.Build()
++		}
++		if err == nil {
++			t.Fatal("required field missing", field)
++		}
++	}
++	for field, values := range map[string][]any{
++		"address": {"node.test", "::1", "0.0.0.0", "224.0.0.1"},
++		"port":    {0, -1, 65536, 8050.5}, "portEnd": {0, -1, 8049, 65536, 8150.5},
++		"username": {""}, "password": {""}, "udp": {true}, "tls": {true}, "network": {"ws"},
++	} {
++		for _, value := range values {
++			m := make(map[string]any)
++			for k, v := range valid {
++				m[k] = v
++			}
++			m[field] = value
++			body, _ := json.Marshal(m)
++			var c conf.VkS6Config
++			err := json.Unmarshal(body, &c)
++			if err == nil {
++				_, err = c.Build()
++			}
++			if err == nil {
++				t.Fatal("invalid parameter accepted", field)
++			}
++		}
++	}
++	for _, extra := range []string{
++		`,"targetStrategy":"AsIs"`, `,"targetStrategy":"ForceIPv6"`,
++		`,"mux":{"enabled":true}`, `,"streamSettings":{"network":"ws"}`,
++		`,"streamSettings":{"security":"tls"}`, `,"streamSettings":{"tcpSettings":{"header":{"type":"http"}}}`,
++	} {
++		body := `{"protocol":"vks6","settings":{"address":"203.0.113.10","port":8050,"username":"vk-test","password":"synthetic-secret"}` + extra + `}`
++		var c conf.OutboundDetourConfig
++		err := json.Unmarshal([]byte(body), &c)
++		if err == nil {
++			_, err = c.Build()
++		}
++		if err == nil {
++			t.Fatal("unsupported transport accepted")
++		}
++	}
++}
++
++func TestVkS6PreservesTransportChainingWithoutExplicitStream(t *testing.T) {
++	var config conf.OutboundDetourConfig
++	if err := json.Unmarshal([]byte(`{"protocol":"vks6","settings":{"address":"203.0.113.10","port":8050,"username":"vk-test","password":"synthetic-secret"},"proxySettings":{"tag":"chain","transportLayer":true}}`), &config); err != nil {
++		t.Fatal(err)
++	}
++	compiled, err := config.Build()
++	if err != nil {
++		t.Fatal(err)
++	}
++	value, err := compiled.SenderSettings.GetInstance()
++	if err != nil {
++		t.Fatal(err)
++	}
++	sender := value.(*proxyman.SenderConfig)
++	if sender.StreamSettings.GetSocketSettings().GetDialerProxy() != "chain" {
++		t.Fatal("dialer proxy lost")
++	}
++}
++
++func TestVkS6ProtocolCaseCannotBypassResolutionOrTransportChecks(t *testing.T) {
++	for _, protocol := range []string{"vks6", "VKS6", "VkS6"} {
++		for _, extra := range []string{"", `,"mux":{"enabled":true}`, `,"streamSettings":{"security":"tls"}`} {
++			body := `{"protocol":"` + protocol + `","settings":{"address":"203.0.113.10","port":8050,"username":"vk-test","password":"synthetic-secret"}` + extra + `}`
++			var config conf.OutboundDetourConfig
++			if err := json.Unmarshal([]byte(body), &config); err != nil {
++				t.Fatal(err)
++			}
++			compiled, err := config.Build()
++			if extra != "" {
++				if err == nil {
++					t.Fatal("protocol case bypassed transport checks")
++				}
++				continue
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			sender, err := compiled.SenderSettings.GetInstance()
++			if err != nil || sender.(*proxyman.SenderConfig).TargetStrategy != internet.DomainStrategy_FORCE_IP4 {
++				t.Fatal("protocol case bypassed IPv4 resolution", err)
++			}
++		}
++	}
++}
+diff --git a/infra/conf/xray.go b/infra/conf/xray.go
+index c748e690..f670f4ee 100644
+--- a/infra/conf/xray.go
++++ b/infra/conf/xray.go
+@@ -45,6 +45,7 @@ var (
+ 		"socks":       func() interface{} { return new(SocksClientConfig) },
+ 		"qyproxy":     func() interface{} { return new(QyProxyConfig) },
+ 		"uusni":       func() interface{} { return new(UuSniConfig) },
++		"vks6":        func() interface{} { return new(VkS6Config) },
+ 		"vless":       func() interface{} { return new(VLessOutboundConfig) },
+ 		"vmess":       func() interface{} { return new(VMessOutboundConfig) },
+ 		"trojan":      func() interface{} { return new(TrojanClientConfig) },
+@@ -331,6 +332,12 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
+ 		return nil, errors.New("failed to build outbound handler for protocol ", c.Protocol).Base(err)
+ 	}
+ 
++	if strings.EqualFold(c.Protocol, "vks6") {
++		if err := c.configureVkS6(senderSettings); err != nil {
++			return nil, err
++		}
++	}
++
+ 	return &core.OutboundHandlerConfig{
+ 		SenderSettings: serial.ToTypedMessage(senderSettings),
+ 		Tag:            c.Tag,
+diff --git a/main/distro/all/all.go b/main/distro/all/all.go
+index ca698f67..9a94e820 100644
+--- a/main/distro/all/all.go
++++ b/main/distro/all/all.go
+@@ -45,6 +45,7 @@ import (
+ 	_ "github.com/xtls/xray-core/proxy/socks"
+ 	_ "github.com/xtls/xray-core/proxy/qyproxy"
+ 	_ "github.com/xtls/xray-core/proxy/uusni"
++	_ "github.com/xtls/xray-core/proxy/vks6"
+ 	_ "github.com/xtls/xray-core/proxy/trojan"
+ 	_ "github.com/xtls/xray-core/proxy/vless/inbound"
+ 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
+diff --git a/proxy/vks6/client.go b/proxy/vks6/client.go
+new file mode 100644
+index 00000000..4601c153
+--- /dev/null
++++ b/proxy/vks6/client.go
+@@ -0,0 +1,219 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"net/netip"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/xtls/xray-core/common"
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/dice"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/common/signal"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/features/dns"
++	"github.com/xtls/xray-core/features/policy"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/internet"
++	"github.com/xtls/xray-core/transport/internet/stat"
++)
++
++// Client owns only in-flight TCP flows. There is no account/control connection,
++// listener, token refresh or SProxy/direct fallback. Close joins active flows.
++type Client struct {
++	config   *Config
++	policy   policy.Manager
++	fakeDNS  dns.FakeDNSEngine
++	mu       sync.Mutex
++	closed   bool
++	requests map[context.Context]context.CancelFunc
++	workers  sync.WaitGroup
++}
++
++func (c *Client) own(parent context.Context) (context.Context, func(), error) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.closed {
++		return nil, nil, net.ErrClosed
++	}
++	if err := parent.Err(); err != nil {
++		return nil, nil, err
++	}
++	ctx, cancel := context.WithCancel(parent)
++	if c.requests == nil {
++		c.requests = make(map[context.Context]context.CancelFunc)
++	}
++	c.requests[ctx] = cancel
++	c.workers.Add(1)
++	return ctx, func() {
++		cancel()
++		c.mu.Lock()
++		delete(c.requests, ctx)
++		c.mu.Unlock()
++		c.workers.Done()
++	}, nil
++}
++
++func (c *Client) Close() error {
++	c.mu.Lock()
++	c.closed = true
++	for _, cancel := range c.requests {
++		cancel()
++	}
++	c.mu.Unlock()
++	c.workers.Wait()
++	return nil
++}
++
++func (c *Client) Process(parent context.Context, link *transport.Link, dialer internet.Dialer) error {
++	obs := session.OutboundsFromContext(parent)
++	if len(obs) == 0 || !obs[len(obs)-1].Target.IsValid() {
++		return errors.New("vks6: target not specified")
++	}
++	ob := obs[len(obs)-1]
++	target := ob.Target
++	if target.Network != xnet.Network_TCP || !target.Address.Family().IsIPv4() {
++		return errors.New("vks6: only real IPv4 TCP targets are supported")
++	}
++	if engine, ok := c.fakeDNS.(dns.FakeDNSEngineRev0); ok && engine.IsIPInIPPool(target.Address) {
++		return errors.New("vks6: unresolved fake-IP target")
++	}
++	ip, ok := netip.AddrFromSlice(target.Address.IP())
++	if !ok {
++		return errors.New("vks6: invalid target address")
++	}
++	header, err := Header(c.config, netip.AddrPortFrom(ip.Unmap(), uint16(target.Port)))
++	if err != nil {
++		return err
++	}
++	ob.Name = "vks6"
++	ob.CanSpliceCopy = 3 // All bytes must pass through XOR, including native splice paths.
++	ctx, finish, err := c.own(parent)
++	if err != nil {
++		return err
++	}
++	defer finish()
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	p := c.policy.ForLevel(c.config.Level)
++	ctx = policy.ContextWithBufferPolicy(ctx, p.Buffer)
++	stopInput := context.AfterFunc(ctx, func() { _ = common.Interrupt(link.Reader) })
++	defer stopInput()
++
++	// Use the protected Xray dialer, including configured chaining and statistics.
++	// One fresh TCP flow chooses one port; rejection never tries a direct fallback.
++	port := c.config.Port + uint32(dice.Roll(int(c.config.endPort()-c.config.Port+1)))
++	node := xnet.TCPDestination(xnet.ParseAddress(c.config.Address), xnet.Port(port))
++	timeout := min(p.Timeouts.Handshake, 10*time.Second)
++	handshakeCtx, finishHandshake := context.WithTimeout(ctx, timeout)
++	defer finishHandshake()
++	conn, err := dialer.Dial(handshakeCtx, node)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++	stopSocket := context.AfterFunc(ctx, func() { _ = conn.Close() })
++	defer stopSocket()
++	stopHandshake := context.AfterFunc(handshakeCtx, func() { _ = conn.Close() })
++	defer stopHandshake()
++	deadline, _ := handshakeCtx.Deadline()
++	if err := conn.SetDeadline(deadline); err != nil {
++		return err
++	}
++	if err := writeFull(conn, header); err != nil {
++		return err
++	}
++	var reply [2]byte
++	if _, err := io.ReadFull(conn, reply[:]); err != nil {
++		if handshakeCtx.Err() != nil {
++			return handshakeCtx.Err()
++		}
++		return err
++	}
++	if reply != [2]byte{6, 0} {
++		return errors.New("vks6: node rejected TCP connect")
++	}
++	// Consume exactly the two ACK bytes, preserving any coalesced target banner.
++	stopHandshake()
++	if err := handshakeCtx.Err(); err != nil {
++		return err
++	}
++	if err := conn.SetDeadline(time.Time{}); err != nil {
++		return err
++	}
++	finishHandshake()
++	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
++	defer timer.SetTimeout(0)
++	stream := &xorConn{Conn: conn, key: 0x5a}
++	return relay(ctx, link, conn, func() error {
++		defer timer.SetTimeout(p.Timeouts.DownlinkOnly)
++		if err := buf.Copy(link.Reader, buf.NewWriter(stream), buf.UpdateActivity(timer)); err != nil {
++			return err
++		}
++		if half, ok := stat.TryUnwrapStatsConn(conn).(interface{ CloseWrite() error }); ok {
++			return half.CloseWrite()
++		}
++		return nil // Non-TCP chained transports finish by downlink/idle timeout.
++	}, func() error {
++		defer timer.SetTimeout(p.Timeouts.UplinkOnly)
++		return buf.Copy(buf.NewReader(stream), link.Writer, buf.UpdateActivity(timer))
++	})
++}
++
++func relay(ctx context.Context, link *transport.Link, conn net.Conn, up, down func() error) error {
++	var workers sync.WaitGroup
++	var responseDelivered atomic.Bool
++	results := make(chan error, 2)
++	defer func() {
++		_ = conn.Close()
++		_ = common.Interrupt(link.Reader)
++		if !responseDelivered.Load() {
++			_ = common.Interrupt(link.Writer)
++		}
++		workers.Wait()
++	}()
++	workers.Add(2)
++	go func() { defer workers.Done(); results <- up() }()
++	go func() {
++		defer workers.Done()
++		err := down()
++		if err == nil {
++			responseDelivered.Store(true)
++			err = common.Close(link.Writer)
++		}
++		results <- err
++	}()
++	for range 2 {
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case err := <-results:
++			if err != nil {
++				return err
++			}
++		}
++	}
++	return nil
++}
++
++func init() {
++	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, raw interface{}) (interface{}, error) {
++		config := raw.(*Config)
++		if err := Validate(config); err != nil {
++			return nil, err
++		}
++		c := &Client{config: config}
++		err := core.RequireFeatures(ctx, func(pm policy.Manager) error { c.policy = pm; return nil })
++		if err == nil {
++			err = core.OptionalFeatures(ctx, func(engine dns.FakeDNSEngine) { c.fakeDNS = engine })
++		}
++		return c, err
++	}))
++}
+diff --git a/proxy/vks6/client_test.go b/proxy/vks6/client_test.go
+new file mode 100644
+index 00000000..e8e48b4f
+--- /dev/null
++++ b/proxy/vks6/client_test.go
+@@ -0,0 +1,279 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/features/policy"
++	"github.com/xtls/xray-core/transport"
++	"github.com/xtls/xray-core/transport/internet/stat"
++	"github.com/xtls/xray-core/transport/pipe"
++)
++
++type testPolicy struct{}
++
++func (testPolicy) Type() interface{}              { return policy.ManagerType() }
++func (testPolicy) Start() error                   { return nil }
++func (testPolicy) Close() error                   { return nil }
++func (testPolicy) ForLevel(uint32) policy.Session { return policy.SessionDefault() }
++func (testPolicy) ForSystem() policy.System       { return policy.System{} }
++
++type testDialer struct {
++	calls atomic.Int32
++	work  func(context.Context, xnet.Destination) (stat.Connection, error)
++}
++
++func (d *testDialer) Dial(ctx context.Context, dest xnet.Destination) (stat.Connection, error) {
++	d.calls.Add(1)
++	return d.work(ctx, dest)
++}
++func (*testDialer) DestIpAddress() xnet.IP                                { return nil }
++func (*testDialer) SetOutboundGateway(context.Context, *session.Outbound) {}
++
++func testContext(target xnet.Destination) context.Context {
++	return session.ContextWithOutbounds(context.Background(), []*session.Outbound{{Target: target, Tag: "synthetic-test"}})
++}
++
++func testLink() (*transport.Link, *pipe.Writer, *pipe.Reader) {
++	ur, uw := pipe.New()
++	dr, dw := pipe.New()
++	return &transport.Link{Reader: ur, Writer: dw}, uw, dr
++}
++
++// The mock decodes the documented bytes independently of the production codec.
++func readMockHeader(conn net.Conn, c *Config) (string, uint16, error) {
++	var prefix [2]byte
++	if _, err := io.ReadFull(conn, prefix[:]); err != nil {
++		return "", 0, err
++	}
++	if prefix[0] != 6 || int(prefix[1]) != len(c.Username) {
++		return "", 0, errors.New("wrong version/username length")
++	}
++	user := make([]byte, int(prefix[1]))
++	if _, err := io.ReadFull(conn, user); err != nil {
++		return "", 0, err
++	}
++	var size [1]byte
++	if _, err := io.ReadFull(conn, size[:]); err != nil {
++		return "", 0, err
++	}
++	if int(size[0]) != len(c.Password) {
++		return "", 0, errors.New("wrong password length")
++	}
++	password := make([]byte, int(size[0]))
++	if _, err := io.ReadFull(conn, password); err != nil {
++		return "", 0, err
++	}
++	key := []byte{60, 38, 68, 99, 76, 43, 67, 64}
++	for i := range user {
++		user[i] ^= key[i%8]
++	}
++	for i := range password {
++		password[i] ^= key[i%8]
++	}
++	if string(user) != c.Username || string(password) != c.Password {
++		return "", 0, errors.New("wrong credential encoding")
++	}
++	var destination [8]byte
++	if _, err := io.ReadFull(conn, destination[:]); err != nil {
++		return "", 0, err
++	}
++	if destination[0] != 9 || destination[1] != 1 {
++		return "", 0, errors.New("wrong command/address type")
++	}
++	return net.IP(destination[2:6]).String(), binary.BigEndian.Uint16(destination[6:]), nil
++}
++
++func TestProcessAckBannerBidirectionalAndHalfClose(t *testing.T) {
++	for _, fragmented := range []bool{false, true} {
++		t.Run(fmt.Sprint(fragmented), func(t *testing.T) {
++			listener, err := net.Listen("tcp4", "127.0.0.1:0")
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer listener.Close()
++			c := fixture()
++			c.Address, c.Port = "127.0.0.1", uint32(listener.Addr().(*net.TCPAddr).Port)
++			c.PortEnd = min(c.Port+4, 65535)
++			serverDone := make(chan error, 1)
++			payload := bytes.Repeat([]byte("client payload\x00\xff"), 3000)
++			go func() {
++				conn, err := listener.Accept()
++				if err != nil {
++					serverDone <- err
++					return
++				}
++				defer conn.Close()
++				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
++				host, port, err := readMockHeader(conn, c)
++				if err != nil {
++					serverDone <- err
++					return
++				}
++				if host != "43.174.102.54" || port != 80 {
++					serverDone <- errors.New("target changed")
++					return
++				}
++				// ACK and early target data may share the same TCP read, or ACK may split.
++				banner := []byte("BANNER")
++				for i := range banner {
++					banner[i] ^= 0x5a
++				}
++				reply := append([]byte{6, 0}, banner...)
++				if fragmented {
++					if _, err = conn.Write(reply[:1]); err != nil {
++						serverDone <- err
++						return
++					}
++					reply = reply[1:]
++				}
++				if _, err = conn.Write(reply); err != nil {
++					serverDone <- err
++					return
++				}
++				body, err := io.ReadAll(conn)
++				if err != nil {
++					serverDone <- err
++					return
++				}
++				for i := range body {
++					body[i] ^= 0x5a
++				}
++				if !bytes.Equal(body, payload) {
++					serverDone <- errors.New("upload corrupted")
++					return
++				}
++				reply = []byte("REPLY AFTER FIN")
++				for i := range reply {
++					reply[i] ^= 0x5a
++				}
++				_, err = conn.Write(reply)
++				serverDone <- err
++			}()
++			dialer := &testDialer{work: func(ctx context.Context, dest xnet.Destination) (stat.Connection, error) {
++				if dest.Network != xnet.Network_TCP || dest.Address.String() != c.Address || (uint32(dest.Port) < c.Port || uint32(dest.Port) > c.PortEnd) {
++					return nil, errors.New("wrong node")
++				}
++				return (&net.Dialer{}).DialContext(ctx, "tcp4", listener.Addr().String())
++			}}
++			client := &Client{config: c, policy: testPolicy{}}
++			defer client.Close()
++			link, upload, download := testLink()
++			defer upload.Close()
++			defer download.Interrupt()
++			done := make(chan error, 1)
++			go func() {
++				done <- client.Process(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 80)), link, dialer)
++			}()
++			reader := &buf.BufferedReader{Reader: download}
++			banner := make([]byte, 6)
++			if _, err = io.ReadFull(reader, banner); err != nil || string(banner) != "BANNER" {
++				t.Fatal("banner/ACK handling", err)
++			}
++			if err = upload.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(payload)}); err != nil {
++				t.Fatal(err)
++			}
++			_ = upload.Close()
++			reply, err := io.ReadAll(reader)
++			if err != nil || string(reply) != "REPLY AFTER FIN" {
++				t.Fatal("half close lost response", string(reply), err)
++			}
++			select {
++			case err = <-done:
++				if err != nil {
++					t.Fatal(err)
++				}
++			case <-time.After(5 * time.Second):
++				t.Fatal("Process did not join")
++			}
++			if err = <-serverDone; err != nil {
++				t.Fatal(err)
++			}
++			if dialer.calls.Load() != 1 {
++				t.Fatal("unexpected retry/fallback")
++			}
++		})
++	}
++}
++
++func TestRejectUnsupportedTargetsWithoutDial(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	defer client.Close()
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) {
++		return nil, errors.New("unexpected dial")
++	}}
++	for _, target := range []xnet.Destination{xnet.UDPDestination(xnet.ParseAddress("43.174.102.54"), 53), xnet.TCPDestination(xnet.ParseAddress("::1"), 443), xnet.TCPDestination(xnet.DomainAddress("example.com"), 443), xnet.TCPDestination(xnet.ParseAddress("198.18.0.1"), 443)} {
++		link, up, down := testLink()
++		if client.Process(testContext(target), link, dialer) == nil {
++			t.Fatal("unsupported target accepted")
++		}
++		up.Close()
++		down.Interrupt()
++	}
++	if dialer.calls.Load() != 0 {
++		t.Fatal("unsupported target caused network traffic")
++	}
++}
++
++func TestCloseCancelsBlockedHeaderAndRejectsNewFlows(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	peer, local := net.Pipe()
++	defer peer.Close()
++	entered := make(chan struct{})
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) { close(entered); return local, nil }}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	done := make(chan error, 1)
++	go func() {
++		done <- client.Process(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 443)), link, dialer)
++	}()
++	<-entered
++	closed := make(chan struct{})
++	go func() { client.Close(); client.Close(); close(closed) }()
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("Close did not cancel blocked handshake")
++	}
++	if err := <-done; err == nil {
++		t.Fatal("cancelled handshake reported success")
++	}
++	link2, up2, down2 := testLink()
++	defer up2.Close()
++	defer down2.Interrupt()
++	if err := client.Process(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 443)), link2, dialer); !errors.Is(err, net.ErrClosed) {
++		t.Fatal("closed outbound admitted flow", err)
++	}
++	if dialer.calls.Load() != 1 {
++		t.Fatal("cancel caused retry/fallback")
++	}
++}
++
++func TestDialFailureDoesNotFallback(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	defer client.Close()
++	rejected := errors.New("synthetic dial failure")
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) { return nil, rejected }}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	if err := client.Process(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 443)), link, dialer); !errors.Is(err, rejected) {
++		t.Fatal(err)
++	}
++	if dialer.calls.Load() != 1 {
++		t.Fatal("failed node used fallback")
++	}
++}
+diff --git a/proxy/vks6/config.pb.go b/proxy/vks6/config.pb.go
+new file mode 100644
+index 00000000..ec9979cf
+--- /dev/null
++++ b/proxy/vks6/config.pb.go
+@@ -0,0 +1,167 @@
++// Code generated by protoc-gen-go. DO NOT EDIT.
++// versions:
++// 	protoc-gen-go v1.36.11
++// 	protoc        v6.33.5
++// source: proxy/vks6/config.proto
++
++package vks6
++
++import (
++	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
++	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
++	reflect "reflect"
++	sync "sync"
++	unsafe "unsafe"
++)
++
++const (
++	// Verify that this generated code is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(20 - protoimpl.MinVersion)
++	// Verify that runtime/protoimpl is sufficiently up-to-date.
++	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
++)
++
++type Config struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Address       string                 `protobuf:"bytes,1,opt,name=address,proto3" json:"address,omitempty"`
++	Port          uint32                 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
++	PortEnd       uint32                 `protobuf:"varint,3,opt,name=port_end,json=portEnd,proto3" json:"port_end,omitempty"`
++	Username      string                 `protobuf:"bytes,4,opt,name=username,proto3" json:"username,omitempty"`
++	Password      string                 `protobuf:"bytes,5,opt,name=password,proto3" json:"password,omitempty"`
++	Level         uint32                 `protobuf:"varint,6,opt,name=level,proto3" json:"level,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *Config) Reset() {
++	*x = Config{}
++	mi := &file_proxy_vks6_config_proto_msgTypes[0]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *Config) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*Config) ProtoMessage() {}
++
++func (x *Config) ProtoReflect() protoreflect.Message {
++	mi := &file_proxy_vks6_config_proto_msgTypes[0]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use Config.ProtoReflect.Descriptor instead.
++func (*Config) Descriptor() ([]byte, []int) {
++	return file_proxy_vks6_config_proto_rawDescGZIP(), []int{0}
++}
++
++func (x *Config) GetAddress() string {
++	if x != nil {
++		return x.Address
++	}
++	return ""
++}
++
++func (x *Config) GetPort() uint32 {
++	if x != nil {
++		return x.Port
++	}
++	return 0
++}
++
++func (x *Config) GetPortEnd() uint32 {
++	if x != nil {
++		return x.PortEnd
++	}
++	return 0
++}
++
++func (x *Config) GetUsername() string {
++	if x != nil {
++		return x.Username
++	}
++	return ""
++}
++
++func (x *Config) GetPassword() string {
++	if x != nil {
++		return x.Password
++	}
++	return ""
++}
++
++func (x *Config) GetLevel() uint32 {
++	if x != nil {
++		return x.Level
++	}
++	return 0
++}
++
++var File_proxy_vks6_config_proto protoreflect.FileDescriptor
++
++const file_proxy_vks6_config_proto_rawDesc = "" +
++	"\n" +
++	"\x17proxy/vks6/config.proto\x12\x0fxray.proxy.vks6\"\x9f\x01\n" +
++	"\x06Config\x12\x18\n" +
++	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
++	"\x04port\x18\x02 \x01(\rR\x04port\x12\x19\n" +
++	"\bport_end\x18\x03 \x01(\rR\aportEnd\x12\x1a\n" +
++	"\busername\x18\x04 \x01(\tR\busername\x12\x1a\n" +
++	"\bpassword\x18\x05 \x01(\tR\bpassword\x12\x14\n" +
++	"\x05level\x18\x06 \x01(\rR\x05levelB&Z$github.com/xtls/xray-core/proxy/vks6b\x06proto3"
++
++var (
++	file_proxy_vks6_config_proto_rawDescOnce sync.Once
++	file_proxy_vks6_config_proto_rawDescData []byte
++)
++
++func file_proxy_vks6_config_proto_rawDescGZIP() []byte {
++	file_proxy_vks6_config_proto_rawDescOnce.Do(func() {
++		file_proxy_vks6_config_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proxy_vks6_config_proto_rawDesc), len(file_proxy_vks6_config_proto_rawDesc)))
++	})
++	return file_proxy_vks6_config_proto_rawDescData
++}
++
++var file_proxy_vks6_config_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
++var file_proxy_vks6_config_proto_goTypes = []any{
++	(*Config)(nil), // 0: xray.proxy.vks6.Config
++}
++var file_proxy_vks6_config_proto_depIdxs = []int32{
++	0, // [0:0] is the sub-list for method output_type
++	0, // [0:0] is the sub-list for method input_type
++	0, // [0:0] is the sub-list for extension type_name
++	0, // [0:0] is the sub-list for extension extendee
++	0, // [0:0] is the sub-list for field type_name
++}
++
++func init() { file_proxy_vks6_config_proto_init() }
++func file_proxy_vks6_config_proto_init() {
++	if File_proxy_vks6_config_proto != nil {
++		return
++	}
++	type x struct{}
++	out := protoimpl.TypeBuilder{
++		File: protoimpl.DescBuilder{
++			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
++			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proxy_vks6_config_proto_rawDesc), len(file_proxy_vks6_config_proto_rawDesc)),
++			NumEnums:      0,
++			NumMessages:   1,
++			NumExtensions: 0,
++			NumServices:   0,
++		},
++		GoTypes:           file_proxy_vks6_config_proto_goTypes,
++		DependencyIndexes: file_proxy_vks6_config_proto_depIdxs,
++		MessageInfos:      file_proxy_vks6_config_proto_msgTypes,
++	}.Build()
++	File_proxy_vks6_config_proto = out.File
++	file_proxy_vks6_config_proto_goTypes = nil
++	file_proxy_vks6_config_proto_depIdxs = nil
++}
+diff --git a/proxy/vks6/config.proto b/proxy/vks6/config.proto
+new file mode 100644
+index 00000000..d7c9c2a3
+--- /dev/null
++++ b/proxy/vks6/config.proto
+@@ -0,0 +1,12 @@
++syntax = "proto3";
++package xray.proxy.vks6;
++option go_package = "github.com/xtls/xray-core/proxy/vks6";
++
++message Config {
++  string address = 1;
++  uint32 port = 2;
++  uint32 port_end = 3;
++  string username = 4;
++  string password = 5;
++  uint32 level = 6;
++}
+diff --git a/proxy/vks6/conn.go b/proxy/vks6/conn.go
+new file mode 100644
+index 00000000..e1a44ef9
+--- /dev/null
++++ b/proxy/vks6/conn.go
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"io"
++	"net"
++)
++
++func xor(data []byte, key byte) {
++	for i := range data {
++		data[i] ^= key
++	}
++}
++
++func writeFull(w io.Writer, data []byte) error {
++	for len(data) > 0 {
++		n, err := w.Write(data)
++		if n < 0 || n > len(data) {
++			return io.ErrShortWrite
++		}
++		data = data[n:]
++		if err != nil {
++			return err
++		}
++		if n == 0 {
++			return io.ErrShortWrite
++		}
++	}
++	return nil
++}
++
++// No ReaderFrom/WriterTo: kernel splice must never bypass the XOR operation.
++type xorConn struct {
++	net.Conn
++	key byte
++}
++
++func (c *xorConn) Read(p []byte) (int, error) {
++	n, err := c.Conn.Read(p)
++	if n > 0 {
++		xor(p[:n], c.key)
++	}
++	return n, err
++}
++
++func (c *xorConn) Write(p []byte) (int, error) {
++	// Do not mutate caller buffers. Bound temporary storage for large writes.
++	total := 0
++	chunk := make([]byte, min(len(p), 32*1024))
++	for len(p) > 0 {
++		n := copy(chunk, p)
++		xor(chunk[:n], c.key)
++		written := 0
++		for written < n {
++			count, err := c.Conn.Write(chunk[written:n])
++			if count < 0 || count > n-written {
++				return total + written, io.ErrShortWrite
++			}
++			written += count
++			if err != nil {
++				return total + written, err
++			}
++			if count == 0 {
++				return total + written, io.ErrShortWrite
++			}
++		}
++		total += n
++		p = p[n:]
++	}
++	return total, nil
++}
+diff --git a/proxy/vks6/conn_test.go b/proxy/vks6/conn_test.go
+new file mode 100644
+index 00000000..3fd0328b
+--- /dev/null
++++ b/proxy/vks6/conn_test.go
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"bytes"
++	"errors"
++	"io"
++	"net"
++	"testing"
++)
++
++type shortConn struct {
++	net.Conn
++	bytes.Buffer
++	max  int
++	fail error
++	zero bool
++}
++
++func (c *shortConn) Write(p []byte) (int, error) {
++	if c.zero {
++		return 0, nil
++	}
++	n := min(len(p), c.max)
++	c.Buffer.Write(p[:n])
++	return n, c.fail
++}
++func (c *shortConn) Read(p []byte) (int, error) { return c.Buffer.Read(p) }
++
++func TestXorShortWritesKeepInputAndOffset(t *testing.T) {
++	plain := bytes.Repeat([]byte{0, 1, 2, 127, 128, 255}, 30000)
++	original := bytes.Clone(plain)
++	conn := &shortConn{max: 7}
++	x := &xorConn{Conn: conn, key: 0x5a}
++	n, err := x.Write(plain)
++	if err != nil || n != len(plain) || !bytes.Equal(plain, original) {
++		t.Fatal("short write or caller-buffer mutation", n, err)
++	}
++	for i, b := range conn.Buffer.Bytes() {
++		if b != plain[i]^0x5a {
++			t.Fatal("XOR chunk offset changed")
++		}
++	}
++	got, err := io.ReadAll(x)
++	if err != nil || !bytes.Equal(got, plain) {
++		t.Fatal("read transform", err)
++	}
++	conn.zero = true
++	if _, err = x.Write([]byte("a")); !errors.Is(err, io.ErrShortWrite) {
++		t.Fatal("zero write was not rejected")
++	}
++	if err = writeFull(conn, []byte("a")); !errors.Is(err, io.ErrShortWrite) {
++		t.Fatal("header zero write was not rejected")
++	}
++	conn.zero = false
++	conn.fail = io.ErrClosedPipe
++	if n, err = x.Write([]byte("123456789")); n != 7 || !errors.Is(err, io.ErrClosedPipe) {
++		t.Fatal("partial error count", n, err)
++	}
++}
+diff --git a/proxy/vks6/failure_test.go b/proxy/vks6/failure_test.go
+new file mode 100644
+index 00000000..8d65fce9
+--- /dev/null
++++ b/proxy/vks6/failure_test.go
+@@ -0,0 +1,145 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"context"
++	"errors"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/transport/internet/stat"
++)
++
++func TestNodeRejectionTruncatedReplyAndDeadline(t *testing.T) {
++	for _, mode := range []string{"reject", "wrong-version", "truncated", "timeout", "close"} {
++		t.Run(mode, func(t *testing.T) {
++			left, right := net.Pipe()
++			defer right.Close()
++			client := &Client{config: fixture(), policy: testPolicy{}}
++			defer client.Close()
++			entered := make(chan struct{})
++			serverDone := make(chan struct{})
++			go func() {
++				defer close(serverDone)
++				_, _, _ = readMockHeader(right, client.config)
++				close(entered)
++				switch mode {
++				case "reject":
++					_, _ = right.Write([]byte{6, 1})
++				case "wrong-version":
++					_, _ = right.Write([]byte{5, 0})
++				case "truncated":
++					_, _ = right.Write([]byte{6})
++					_ = right.Close()
++				}
++			}()
++			dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) { return left, nil }}
++			link, up, down := testLink()
++			defer up.Close()
++			defer down.Interrupt()
++			ctx, cancel := context.WithTimeout(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 80)), 200*time.Millisecond)
++			defer cancel()
++			done := make(chan error, 1)
++			go func() { done <- client.Process(ctx, link, dialer) }()
++			<-entered
++			if mode == "close" {
++				_ = client.Close()
++			}
++			select {
++			case err := <-done:
++				if err == nil {
++					t.Fatal("failed handshake reported success")
++				}
++			case <-time.After(time.Second):
++				t.Fatal("handshake did not terminate")
++			}
++			<-serverDone
++			if dialer.calls.Load() != 1 {
++				t.Fatal("node failure caused fallback")
++			}
++		})
++	}
++}
++
++func TestDialCancellationAndAlreadyCancelledFlow(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	defer client.Close()
++	ctx, cancel := context.WithCancel(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 80)))
++	entered := make(chan struct{})
++	dialer := &testDialer{work: func(ctx context.Context, _ xnet.Destination) (stat.Connection, error) {
++		close(entered)
++		<-ctx.Done()
++		return nil, ctx.Err()
++	}}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	done := make(chan error, 1)
++	go func() { done <- client.Process(ctx, link, dialer) }()
++	<-entered
++	cancel()
++	if err := <-done; !errors.Is(err, context.Canceled) {
++		t.Fatal("dial cancellation lost", err)
++	}
++	if err := client.Process(ctx, link, dialer); !errors.Is(err, context.Canceled) {
++		t.Fatal("cancelled flow admitted", err)
++	}
++	if dialer.calls.Load() != 1 {
++		t.Fatal("cancelled context dialed")
++	}
++}
++
++// Ensure writeFull reports a writer that cannot make progress without spinning.
++func TestHeaderShortWrite(t *testing.T) {
++	writer := &shortConn{max: 2}
++	header := []byte{6, 7, 1, 2, 3, 4, 5}
++	if err := writeFull(writer, header); err != nil || writer.Len() != len(header) {
++		t.Fatal("short header write", err)
++	}
++	writer.zero = true
++	if err := writeFull(writer, header); !errors.Is(err, io.ErrShortWrite) {
++		t.Fatal("zero header write accepted")
++	}
++}
++
++func TestCloseCancelsActiveRelayAndJoinsBothDirections(t *testing.T) {
++	left, right := net.Pipe()
++	defer right.Close()
++	client := &Client{config: fixture(), policy: testPolicy{}}
++	defer client.Close()
++	serverDone := make(chan struct{})
++	go func() {
++		defer close(serverDone)
++		_, _, _ = readMockHeader(right, client.config)
++		_, _ = right.Write([]byte{6, 0, 'B' ^ 0x5a})
++		_, _ = io.Copy(io.Discard, right)
++	}()
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) { return left, nil }}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	done := make(chan error, 1)
++	go func() {
++		done <- client.Process(testContext(xnet.TCPDestination(xnet.ParseAddress("43.174.102.54"), 80)), link, dialer)
++	}()
++	reader := &buf.BufferedReader{Reader: down}
++	var banner [1]byte
++	if _, err := io.ReadFull(reader, banner[:]); err != nil || banner[0] != 'B' {
++		t.Fatal("relay did not start", err)
++	}
++	closed := make(chan struct{})
++	go func() { _ = client.Close(); _ = client.Close(); close(closed) }()
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("active relay did not join")
++	}
++	if err := <-done; err == nil {
++		t.Fatal("cancelled relay reported success")
++	}
++	<-serverDone
++}
+diff --git a/proxy/vks6/fake_dns_test.go b/proxy/vks6/fake_dns_test.go
+new file mode 100644
+index 00000000..101f2000
+--- /dev/null
++++ b/proxy/vks6/fake_dns_test.go
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/features/dns"
++	"github.com/xtls/xray-core/transport/internet/stat"
++)
++
++type testFakeDNS struct{}
++
++func (testFakeDNS) Type() interface{}                                     { return (*dns.FakeDNSEngine)(nil) }
++func (testFakeDNS) Start() error                                          { return nil }
++func (testFakeDNS) Close() error                                          { return nil }
++func (testFakeDNS) GetFakeIPForDomain(string) []xnet.Address              { return nil }
++func (testFakeDNS) GetDomainFromFakeDNS(xnet.Address) string              { return "original.example" }
++func (testFakeDNS) GetFakeIPForDomain3(string, bool, bool) []xnet.Address { return nil }
++func (testFakeDNS) IsIPInIPPool(ip xnet.Address) bool                     { return ip.String() == "203.0.113.77" }
++
++func TestConfiguredFakePoolIsRejectedBeforeDial(t *testing.T) {
++	client := &Client{config: fixture(), policy: testPolicy{}, fakeDNS: testFakeDNS{}}
++	defer client.Close()
++	dialer := &testDialer{work: func(context.Context, xnet.Destination) (stat.Connection, error) {
++		return nil, errors.New("unexpected dial")
++	}}
++	link, up, down := testLink()
++	defer up.Close()
++	defer down.Interrupt()
++	if client.Process(testContext(xnet.TCPDestination(xnet.ParseAddress("203.0.113.77"), 443)), link, dialer) == nil {
++		t.Fatal("custom fake pool accepted")
++	}
++	if dialer.calls.Load() != 0 {
++		t.Fatal("fake IP caused network traffic")
++	}
++}
+diff --git a/proxy/vks6/wire.go b/proxy/vks6/wire.go
+new file mode 100644
+index 00000000..f05fa723
+--- /dev/null
++++ b/proxy/vks6/wire.go
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: MPL-2.0
++// VK Android 4.4.16's observed S6 IPv4/TCP download variant.
++package vks6
++
++import (
++	"encoding/binary"
++	"errors"
++	"net/netip"
++	"unicode/utf8"
++)
++
++var authKey = [...]byte{0x3c, 0x26, 0x44, 0x63, 0x4c, 0x2b, 0x43, 0x40}
++var defaultFakePool = netip.MustParsePrefix("198.18.0.0/15")
++
++func (c *Config) endPort() uint32 {
++	if c.PortEnd == 0 {
++		return c.Port
++	}
++	return c.PortEnd
++}
++
++func Validate(c *Config) error {
++	if c == nil || c.Port == 0 || c.Port > 65535 || c.endPort() < c.Port || c.endPort() > 65535 {
++		return errors.New("vks6: invalid node TCP port range")
++	}
++	ip, err := netip.ParseAddr(c.Address)
++	if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.As4()[0] >= 224 {
++		return errors.New("vks6: a numeric unicast IPv4 node is required")
++	}
++	if !utf8.ValidString(c.Username) || !utf8.ValidString(c.Password) ||
++		len(c.Username) < 1 || len(c.Username) > 255 || len(c.Password) < 1 || len(c.Password) > 255 {
++		return errors.New("vks6: session credentials must contain 1-255 UTF-8 bytes")
++	}
++	return nil
++}
++
++// Header is the raw request. Each credential restarts the eight-byte XOR key;
++// neither the version/length bytes nor the destination are data-XORed.
++func Header(c *Config, target netip.AddrPort) ([]byte, error) {
++	if err := Validate(c); err != nil {
++		return nil, err
++	}
++	ip := target.Addr().Unmap()
++	if !ip.Is4() || target.Port() == 0 || defaultFakePool.Contains(ip) {
++		return nil, errors.New("vks6: a real IPv4 TCP destination is required")
++	}
++	out := make([]byte, 11+len(c.Username)+len(c.Password))
++	out[0], out[1] = 6, byte(len(c.Username))
++	i := 2
++	for n := range len(c.Username) {
++		out[i+n] = c.Username[n] ^ authKey[n%len(authKey)]
++	}
++	i += len(c.Username)
++	out[i] = byte(len(c.Password))
++	i++
++	for n := range len(c.Password) {
++		out[i+n] = c.Password[n] ^ authKey[n%len(authKey)]
++	}
++	i += len(c.Password)
++	out[i], out[i+1] = 9, 1
++	i += 2
++	ipv4 := ip.As4()
++	copy(out[i:i+4], ipv4[:])
++	binary.BigEndian.PutUint16(out[i+4:], target.Port())
++	return out, nil
++}
+diff --git a/proxy/vks6/wire_test.go b/proxy/vks6/wire_test.go
+new file mode 100644
+index 00000000..682a76e2
+--- /dev/null
++++ b/proxy/vks6/wire_test.go
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: MPL-2.0
++package vks6
++
++import (
++	"encoding/hex"
++	"net/netip"
++	"strings"
++	"testing"
++)
++
++func fixture() *Config {
++	return &Config{Address: "203.0.113.10", Port: 8050, PortEnd: 8150,
++		Username: "vk-test", Password: "0123456789abcdef"}
++}
++
++func TestHeaderCapturedFormatVector(t *testing.T) {
++	got, err := Header(fixture(), netip.MustParseAddrPort("43.174.102.54:80"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Independently calculated Python struct/socket vector published in the manual.
++	if hex.EncodeToString(got) != "06074a4d6917295837100c177650781e7577041f25012f4f262609012bae66360050" {
++		t.Fatal("request does not match independent vector")
++	}
++}
++
++func TestConfigAndCredentialByteBoundaries(t *testing.T) {
++	for _, length := range []int{1, 255} {
++		c := fixture()
++		c.Username, c.Password = strings.Repeat("x", length), strings.Repeat("y", length)
++		got, err := Header(c, netip.MustParseAddrPort("43.174.102.54:65535"))
++		if err != nil || len(got) != 11+2*length {
++			t.Fatal("valid byte length rejected", err)
++		}
++	}
++	c := fixture()
++	c.Username = strings.Repeat("中", 85)
++	if Validate(c) != nil {
++		t.Fatal("255 UTF-8 bytes rejected")
++	}
++	c.Username += "a"
++	if Validate(c) == nil {
++		t.Fatal("256 UTF-8 bytes accepted")
++	}
++	for _, mutate := range []func(*Config){
++		func(c *Config) { c.Port = 0 }, func(c *Config) { c.Port = 65536 },
++		func(c *Config) { c.PortEnd = 65536 }, func(c *Config) { c.PortEnd = 8049 },
++		func(c *Config) { c.Username = "" }, func(c *Config) { c.Password = "" },
++		func(c *Config) { c.Password = "\xff" }, func(c *Config) { c.Address = "node.example" },
++		func(c *Config) { c.Address = "::1" }, func(c *Config) { c.Address = "0.0.0.0" },
++		func(c *Config) { c.Address = "224.0.0.1" },
++	} {
++		c := fixture()
++		mutate(c)
++		if Validate(c) == nil {
++			t.Fatal("invalid configuration accepted")
++		}
++	}
++	c = fixture()
++	c.PortEnd = 0
++	if Validate(c) != nil || c.endPort() != c.Port {
++		t.Fatal("fixed port default lost")
++	}
++	for _, target := range []string{"[2001:db8::1]:80", "43.174.102.54:0", "198.18.0.1:80", "198.19.255.255:443"} {
++		if _, err := Header(fixture(), netip.MustParseAddrPort(target)); err == nil {
++			t.Fatal("invalid target accepted")
++		}
++	}
++}

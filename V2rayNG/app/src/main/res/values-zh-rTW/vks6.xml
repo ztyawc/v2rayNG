@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_vks6">VK S6（TCP）</string>
+    <string name="menu_item_import_config_manually_vks6">手動輸入 [VK S6]</string>
+    <string name="vks6_port_end">節點連接埠上限（選填）</string>
+    <string name="vks6_username">工作階段使用者名稱</string>
+    <string name="vks6_password">工作階段密碼</string>
+    <string name="vks6_hint">僅支援 TCP/IPv4。填寫 VK 目前工作階段提供的入口和憑證；連接埠上限留空時使用固定連接埠。</string>
+    <string name="vks6_invalid_config">請填寫備註、有效 IPv4 節點、由小到大排列的連接埠（1–65535），以及各佔 1–255 個 UTF-8 位元組的工作階段使用者名稱和密碼。</string>
+</resources>

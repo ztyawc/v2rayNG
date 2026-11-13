@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_vks6">VK S6 (TCP)</string>
+    <string name="menu_item_import_config_manually_vks6">Type manually [VK S6]</string>
+    <string name="vks6_port_end">Last node port (optional)</string>
+    <string name="vks6_username">Session username</string>
+    <string name="vks6_password">Session password</string>
+    <string name="vks6_hint">TCP/IPv4 only. Enter the node and credentials from your current VK session. Leave the last port empty to use a fixed port.</string>
+    <string name="vks6_invalid_config">Enter a remark, a valid IPv4 node, ports 1–65535 in ascending order and session credentials of 1–255 UTF-8 bytes each.</string>
+</resources>

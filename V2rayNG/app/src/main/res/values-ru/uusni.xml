@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI (TCP)</string>
+    <string name="menu_item_import_config_manually_uusni">Ввести вручную [UU SNI]</string>
+    <string name="uusni_obfs_key">Значение маскировки (obfs_key, 0–255)</string>
+    <string name="uusni_crypt">Шифровать адрес назначения (sni_crypt)</string>
+    <string name="uusni_hint">Только TCP. Введите полученные IPv4 узла, порт и значение маскировки.</string>
+    <string name="uusni_invalid_config">Введите примечание, корректный IPv4 узла, порт 1–65535 и значение маскировки 0–255.</string>
+</resources>
