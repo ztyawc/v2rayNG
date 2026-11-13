@@ -79,6 +79,7 @@ object VkS6Fmt {
         require(isValid(config)) { "Invalid VK S6 profile" }
         val credentials = "${Utils.encodeURIComponent(config.username.orEmpty())}:${Utils.encodeURIComponent(config.password.orEmpty())}"
         val range = config.vkS6?.portEnd?.let { "?port-end=$it" }.orEmpty()
-        return "$credentials@${config.server}:${config.serverPort}$range#${Utils.encodeURIComponent(config.remarks)}"
+        val port = config.serverPort.orEmpty().toInt()
+        return "$credentials@${config.server}:$port$range#${Utils.encodeURIComponent(config.remarks)}"
     }
 }

@@ -244,10 +244,10 @@ index 00000000..365d6f5b
 +}
 diff --git a/infra/conf/vks6_test.go b/infra/conf/vks6_test.go
 new file mode 100644
-index 00000000..95f45fa1
+index 00000000..177d5169
 --- /dev/null
 +++ b/infra/conf/vks6_test.go
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,147 @@
 +// SPDX-License-Identifier: MPL-2.0
 +package conf_test
 +
@@ -369,8 +369,34 @@ index 00000000..95f45fa1
 +		t.Fatal("dialer proxy lost")
 +	}
 +}
++
++func TestVkS6ProtocolCaseCannotBypassResolutionOrTransportChecks(t *testing.T) {
++	for _, protocol := range []string{"vks6", "VKS6", "VkS6"} {
++		for _, extra := range []string{"", `,"mux":{"enabled":true}`, `,"streamSettings":{"security":"tls"}`} {
++			body := `{"protocol":"` + protocol + `","settings":{"address":"203.0.113.10","port":8050,"username":"vk-test","password":"synthetic-secret"}` + extra + `}`
++			var config conf.OutboundDetourConfig
++			if err := json.Unmarshal([]byte(body), &config); err != nil {
++				t.Fatal(err)
++			}
++			compiled, err := config.Build()
++			if extra != "" {
++				if err == nil {
++					t.Fatal("protocol case bypassed transport checks")
++				}
++				continue
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			sender, err := compiled.SenderSettings.GetInstance()
++			if err != nil || sender.(*proxyman.SenderConfig).TargetStrategy != internet.DomainStrategy_FORCE_IP4 {
++				t.Fatal("protocol case bypassed IPv4 resolution", err)
++			}
++		}
++	}
++}
 diff --git a/infra/conf/xray.go b/infra/conf/xray.go
-index c748e690..bdd2e72b 100644
+index c748e690..f670f4ee 100644
 --- a/infra/conf/xray.go
 +++ b/infra/conf/xray.go
 @@ -45,6 +45,7 @@ var (
@@ -385,7 +411,7 @@ index c748e690..bdd2e72b 100644
  		return nil, errors.New("failed to build outbound handler for protocol ", c.Protocol).Base(err)
  	}
  
-+	if c.Protocol == "vks6" {
++	if strings.EqualFold(c.Protocol, "vks6") {
 +		if err := c.configureVkS6(senderSettings); err != nil {
 +			return nil, err
 +		}

@@ -61,6 +61,16 @@ class VkS6FmtTest {
         }
     }
 
+    @Test fun sharingCanonicalizesAcceptedNumericPortText() {
+        for (port in listOf("8050", "+8050", "08050")) {
+            val original = profile().apply { serverPort = port }
+            assertTrue(VkS6Fmt.isValid(original))
+            val restored = VkS6Fmt.parse(AppConfig.VK_S6 + VkS6Fmt.toUri(original))!!
+            assertEquals("8050", restored.serverPort)
+            assertEquals(original.vkS6, restored.vkS6)
+        }
+    }
+
     @Test fun invalidProfilesCannotBeSharedAndRangeChangesIdentity() {
         for (invalid in listOf(
             profile().apply { server = "1.02.3.4" }, profile().apply { server = "0.0.0.0" },
