@@ -15,6 +15,7 @@ import com.v2ray.ang.extension.isNotNullEmpty
 import com.v2ray.ang.fmt.CmccSocksFmt
 import com.v2ray.ang.fmt.QyProxyFmt
 import com.v2ray.ang.fmt.UuSniFmt
+import com.v2ray.ang.fmt.VkS6Fmt
 import com.v2ray.ang.fmt.CustomFmt
 import com.v2ray.ang.fmt.Hysteria2Fmt
 import com.v2ray.ang.fmt.HttpFmt
@@ -50,6 +51,7 @@ object AngConfigManager {
             EConfigType.PRIVATE_SOCKS.protocolScheme to CmccSocksFmt::parse,
             EConfigType.QYPROXY.protocolScheme to QyProxyFmt::parse,
             EConfigType.UUSNI.protocolScheme to UuSniFmt::parse,
+            EConfigType.VKS6.protocolScheme to VkS6Fmt::parse,
             EConfigType.HTTP.protocolScheme to HttpFmt::parse,
             EConfigType.TROJAN.protocolScheme to TrojanFmt::parse,
             EConfigType.VLESS.protocolScheme to VlessFmt::parse,
@@ -170,6 +172,7 @@ object AngConfigManager {
                 EConfigType.PRIVATE_SOCKS -> CmccSocksFmt.toUri(config)
                 EConfigType.QYPROXY -> QyProxyFmt.toUri(config)
                 EConfigType.UUSNI -> UuSniFmt.toUri(config)
+                EConfigType.VKS6 -> VkS6Fmt.toUri(config)
                 EConfigType.HTTP -> HttpFmt.toUri(config)
                 EConfigType.VLESS -> VlessFmt.toUri(config)
                 EConfigType.TROJAN -> TrojanFmt.toUri(config)

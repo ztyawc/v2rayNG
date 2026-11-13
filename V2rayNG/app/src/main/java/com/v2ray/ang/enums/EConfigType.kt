@@ -18,6 +18,7 @@ enum class EConfigType(val value: Int, val protocolScheme: String) {
     PRIVATE_SOCKS(11, AppConfig.CMCC_SOCKS),
     QYPROXY(12, AppConfig.QYPROXY),
     UUSNI(13, AppConfig.UU_SNI),
+    VKS6(14, AppConfig.VK_S6),
     POLICYGROUP(101, AppConfig.CUSTOM),
     PROXYCHAIN(102, AppConfig.CUSTOM);
 

@@ -68,6 +68,7 @@ data class V2rayConfig(
         var protocol: String,
         var settings: OutSettingsBean? = null,
         var streamSettings: StreamSettingsBean? = null,
+        var targetStrategy: String? = null,
         val sendThrough: String? = null,
         var mux: MuxBean? = MuxBean(false)
     ) {
@@ -85,6 +86,9 @@ data class V2rayConfig(
             /*UU custom SNI/TCP*/
             var obfsKey: Int? = null,
             var sniCrypt: Boolean? = null,
+            /*VK S6 download TCP*/
+            var portEnd: Int? = null,
+            var username: String? = null,
             /*QyProxy CN2*/
             var role: String? = null,
             var sn: String? = null,

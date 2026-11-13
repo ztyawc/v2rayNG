@@ -8,6 +8,7 @@ readonly QYPROXY_PATCH="$REPO_DIR/patches/xray-core-qyproxy-cn2.patch"
 readonly QYPROXY_PRIMARY_PATCH="$REPO_DIR/patches/xray-core-qyproxy-primary.patch"
 readonly PLAINTEXT_PATCH="$REPO_DIR/patches/xray-core-plaintext-vless-trojan.patch"
 readonly UU_SNI_PATCH="$REPO_DIR/patches/xray-core-uu-custom-sni.patch"
+readonly VK_S6_PATCH="$REPO_DIR/patches/xray-core-vk-s6.patch"
 # The submodule owns the pinned source checkout, patches, assets and native tests.
 OUTPUT_AAR="$REPO_DIR/AndroidLibXrayLite/.build/libv2ray-base-arm64.aar" \
     bash "$REPO_DIR/AndroidLibXrayLite/scripts/build-libv2ray-arm64.sh"
@@ -23,12 +24,16 @@ git -C "$XRAY_DIR" apply --check "$PLAINTEXT_PATCH"
 git -C "$XRAY_DIR" apply "$PLAINTEXT_PATCH"
 git -C "$XRAY_DIR" apply --unidiff-zero --check "$UU_SNI_PATCH"
 git -C "$XRAY_DIR" apply --unidiff-zero "$UU_SNI_PATCH"
+git -C "$XRAY_DIR" apply --check "$VK_S6_PATCH"
+git -C "$XRAY_DIR" apply "$VK_S6_PATCH"
 (
     cd "$XRAY_DIR"
     GOWORK=off go test -race ./proxy/socks ./proxy/qyproxy/...
     GOWORK=off go test -race ./infra/conf -run '^TestPlaintextVlessTrojan'
     GOWORK=off go test -race ./proxy/uusni
     GOWORK=off go test -race ./infra/conf -run '^TestUuSni'
+    GOWORK=off go test -race ./proxy/vks6
+    GOWORK=off go test -race ./infra/conf -run '^TestVkS6'
     GOWORK=off go test ./proxy/http ./proxy/socks ./proxy/qyproxy/...
     GOWORK=off go test ./infra/conf -run '^(TestSocks|TestQyProxy|TestVLess|TestTrojan|TestPlaintextVlessTrojan)'
 )

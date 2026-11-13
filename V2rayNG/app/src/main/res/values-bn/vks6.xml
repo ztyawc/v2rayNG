@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_vks6">VK S6 (TCP)</string>
+    <string name="menu_item_import_config_manually_vks6">হাতে লিখুন [VK S6]</string>
+    <string name="vks6_port_end">নোডের শেষ পোর্ট (ঐচ্ছিক)</string>
+    <string name="vks6_username">সেশনের ব্যবহারকারীর নাম</string>
+    <string name="vks6_password">সেশনের পাসওয়ার্ড</string>
+    <string name="vks6_hint">শুধু TCP/IPv4। বর্তমান VK সেশনের নোড ও পরিচয়তথ্য লিখুন। নির্দিষ্ট পোর্ট ব্যবহার করতে শেষ পোর্ট খালি রাখুন।</string>
+    <string name="vks6_invalid_config">মন্তব্য, বৈধ IPv4 নোড, ছোট থেকে বড় ক্রমে 1–65535 পোর্ট এবং প্রতিটি 1–255 UTF-8 বাইটের সেশন পরিচয়তথ্য লিখুন।</string>
+</resources>

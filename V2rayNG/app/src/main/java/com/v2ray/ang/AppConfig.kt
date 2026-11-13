@@ -212,6 +212,7 @@ object AppConfig {
     const val CMCC_SOCKS = "cmcc://"
     const val QYPROXY = "qyproxy://"
     const val UU_SNI = "uusni://"
+    const val VK_S6 = "vks6://"
     const val HTTP = "http://"
     const val VLESS = "vless://"
     const val TROJAN = "trojan://"

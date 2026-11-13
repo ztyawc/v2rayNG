@@ -39,6 +39,7 @@ import com.v2ray.ang.ui.server.ServerHysteria2Activity
 import com.v2ray.ang.ui.server.ServerPrivateSocksActivity
 import com.v2ray.ang.ui.server.ServerQyProxyActivity
 import com.v2ray.ang.ui.server.ServerUuSniActivity
+import com.v2ray.ang.ui.server.ServerVkS6Activity
 import com.v2ray.ang.ui.server.ServerProxyChainActivity
 import com.v2ray.ang.ui.server.ServerShadowsocksActivity
 import com.v2ray.ang.ui.server.ServerSocksActivity
@@ -208,6 +209,7 @@ class MainActivity : HelperBaseComponentActivity() {
             EConfigType.PRIVATE_SOCKS.value -> Intent(this, ServerPrivateSocksActivity::class.java)
             EConfigType.QYPROXY.value -> Intent(this, ServerQyProxyActivity::class.java)
             EConfigType.UUSNI.value -> Intent(this, ServerUuSniActivity::class.java)
+            EConfigType.VKS6.value -> Intent(this, ServerVkS6Activity::class.java)
             EConfigType.HTTP.value -> Intent(this, ServerHttpActivity::class.java)
             EConfigType.TROJAN.value -> Intent(this, ServerTrojanActivity::class.java)
             EConfigType.WIREGUARD.value -> Intent(this, ServerWireguardActivity::class.java)
@@ -263,6 +265,7 @@ class MainActivity : HelperBaseComponentActivity() {
             EConfigType.PRIVATE_SOCKS -> ServerPrivateSocksActivity::class.java
             EConfigType.QYPROXY -> ServerQyProxyActivity::class.java
             EConfigType.UUSNI -> ServerUuSniActivity::class.java
+            EConfigType.VKS6 -> ServerVkS6Activity::class.java
             EConfigType.HTTP -> ServerHttpActivity::class.java
             EConfigType.TROJAN -> ServerTrojanActivity::class.java
             EConfigType.WIREGUARD -> ServerWireguardActivity::class.java

@@ -12,6 +12,7 @@ import com.v2ray.ang.extension.nullIfBlank
 import com.v2ray.ang.fmt.CmccSocksFmt
 import com.v2ray.ang.fmt.QyProxyFmt
 import com.v2ray.ang.fmt.UuSniFmt
+import com.v2ray.ang.fmt.VkS6Fmt
 import com.v2ray.ang.handler.MmkvManager
 import com.v2ray.ang.util.HttpUtil
 import com.v2ray.ang.util.JsonUtil
@@ -33,6 +34,7 @@ object CoreOutboundBuilder {
             EConfigType.PRIVATE_SOCKS -> toOutboundPrivateSocks(profileItem)
             EConfigType.QYPROXY -> toOutboundQyProxy(profileItem)
             EConfigType.UUSNI -> toOutboundUuSni(profileItem)
+            EConfigType.VKS6 -> toOutboundVkS6(profileItem)
             EConfigType.VLESS -> toOutboundVless(profileItem)
             EConfigType.TROJAN -> toOutboundTrojan(profileItem)
             EConfigType.WIREGUARD -> toOutboundWireguard(profileItem)
@@ -56,6 +58,7 @@ object CoreOutboundBuilder {
                 || protocol.equals(EConfigType.SOCKS.name, true)
                 || protocol.equals(EConfigType.QYPROXY.name, true)
                 || protocol.equals(EConfigType.UUSNI.name, true)
+                || protocol.equals(EConfigType.VKS6.name, true)
                 || protocol.equals(EConfigType.HTTP.name, true)
                 || protocol.equals(EConfigType.TROJAN.name, true)
                 || protocol.equals(EConfigType.WIREGUARD.name, true)
@@ -97,6 +100,7 @@ object CoreOutboundBuilder {
             EConfigType.HTTP,
             EConfigType.QYPROXY,
             EConfigType.UUSNI,
+            EConfigType.VKS6,
             EConfigType.TROJAN -> OutboundBean(
                 protocol = configType.name.lowercase(),
                 settings = OutboundBean.OutSettingsBean(),
@@ -308,6 +312,23 @@ object CoreOutboundBuilder {
                 sniCrypt = options.sniCrypt
                 level = AppConfig.DEFAULT_LEVEL
             }
+            mux?.enabled = false
+            mux?.concurrency = -1
+        }
+    }
+
+    internal fun toOutboundVkS6(profileItem: ProfileItem): OutboundBean? {
+        if (!VkS6Fmt.isValid(profileItem)) return null
+        return createInitOutbound(EConfigType.VKS6)?.apply {
+            settings?.apply {
+                address = profileItem.server
+                port = profileItem.serverPort?.toIntOrNull()
+                portEnd = profileItem.vkS6?.portEnd
+                username = profileItem.username
+                password = profileItem.password
+                level = AppConfig.DEFAULT_LEVEL
+            }
+            targetStrategy = "ForceIPv4"
             mux?.enabled = false
             mux?.concurrency = -1
         }

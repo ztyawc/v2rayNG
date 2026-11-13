@@ -8,6 +8,12 @@ import org.junit.Test
 class MainImportMenuTest {
 
     @Test
+    fun importMenuCreatesTheNativeVkS6ProfileType() {
+        assertEquals(R.string.menu_item_import_config_manually_vks6, ImportMenuAction.VkS6.labelRes)
+        assertEquals(MainAction.ImportManually(EConfigType.VKS6.value), ImportMenuAction.VkS6.action)
+    }
+
+    @Test
     fun importMenuCreatesTheNativeUuSniProfileType() {
         assertEquals(R.string.menu_item_import_config_manually_uusni, ImportMenuAction.UuSni.labelRes)
         assertEquals(MainAction.ImportManually(EConfigType.UUSNI.value), ImportMenuAction.UuSni.action)

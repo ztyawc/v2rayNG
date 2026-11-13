@@ -104,6 +104,11 @@
             android:exported="false"
             android:label="@string/server_uusni" />
         <activity
+            android:name=".ui.server.ServerVkS6Activity"
+            android:exported="false"
+            android:label="@string/server_vks6"
+            android:windowSoftInputMode="stateUnchanged|adjustResize" />
+        <activity
             android:name=".ui.server.ServerQyProxyActivity"
             android:exported="false"
             android:windowSoftInputMode="stateUnchanged|adjustResize" />
