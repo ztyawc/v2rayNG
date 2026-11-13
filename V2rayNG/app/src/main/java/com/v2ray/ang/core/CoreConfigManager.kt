@@ -617,12 +617,22 @@ object CoreConfigManager {
     /**
      * Configure local DNS inbounds, outbounds, and routing rules.
      */
-    private fun configureLocalDns(configContext: CoreConfigContext, v2rayConfig: V2rayConfig) {
-        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_LOCAL_DNS_ENABLED) != true) {
+    internal fun configureLocalDns(
+        configContext: CoreConfigContext,
+        v2rayConfig: V2rayConfig,
+        localDnsEnabled: Boolean = MmkvManager.decodeSettingsBool(AppConfig.PREF_LOCAL_DNS_ENABLED) == true,
+        fakeDnsEnabled: Boolean = MmkvManager.decodeSettingsBool(AppConfig.PREF_FAKE_DNS_ENABLED) == true,
+        vpnMode: Boolean = SettingsManager.isVpnMode(),
+        usingHevTun: Boolean = SettingsManager.isUsingHevTun(),
+    ) {
+        // S6 cannot carry the VPN's UDP DNS packets. Intercept DNS at runtime
+        // without changing the saved toggle or enabling FakeDNS implicitly.
+        val s6Vpn = vpnMode && v2rayConfig.outbounds.any { it.protocol.equals(EConfigType.VKS6.name, true) }
+        if (!localDnsEnabled && !s6Vpn) {
             return
         }
 
-        if (MmkvManager.decodeSettingsBool(AppConfig.PREF_FAKE_DNS_ENABLED) == true) {
+        if (localDnsEnabled && fakeDnsEnabled) {
             val geositeCn = arrayListOf(AppConfig.GEOSITE_CN)
             val routingDomains = configContext.routingDomainRules
                 .asSequence()
@@ -641,8 +651,8 @@ object CoreConfigManager {
             )
         }
 
-        if (SettingsManager.isVpnMode()) {
-            if (SettingsManager.isUsingHevTun()) {
+        if (vpnMode) {
+            if (usingHevTun) {
                 //hev-socks5-tunnel dns routing
                 v2rayConfig.routing.rules.add(
                     0, V2rayConfig.RoutingBean.RulesBean(

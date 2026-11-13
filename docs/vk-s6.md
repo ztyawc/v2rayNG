@@ -43,6 +43,13 @@ pool. Resolution failures never fall back to direct traffic. Keep remote DNS
 on DoH or TCP; the app's default Cloudflare DoH already uses TCP. A custom UDP
 DNS resolver cannot be carried through this TCP-only node.
 
+For VPN configurations containing S6 (including chain/group members), runtime
+configuration routes port-53 requests from the active HEV SOCKS or native TUN
+inbound to Xray's DNS module, even when the saved local-DNS toggle is off. This
+keeps the default phone resolver from sending unsupported UDP to the S6 node.
+It does not write that toggle or implicitly enable FakeDNS. Proxy-only mode
+retains its existing behavior; root mode already intercepts DNS independently.
+
 Normal v2rayNG rules select which connections use S6; VK's per-game rules are
 not imported. VPN, proxy-only and root modes retain their existing service,
 protected socket and tunnel owners. Mux and outer TLS/other transports are
@@ -94,6 +101,9 @@ exercise JSON/protobuf/factory registration, port defaults, unsupported settings
 transport chaining and verified HTTPS through a local mock S6 node with DNS hosts.
 JVM tests cover native settings, URI/backup compatibility, menu mapping, editor
 validation, load/save failures, restoration by GUID and owner cancellation.
+DNS configuration tests inspect generated HEV/native-TUN routing with the local
+toggle off, chain/group members, inactive FakeDNS, explicit local/FakeDNS and
+unchanged non-S6/non-VPN branches.
 GitHub's build also runs all JVM variants, debug assemblies, lint and native APK
 packaging checks. The release workflow verifies package/version and the existing
 Telecom signing certificate before publishing the ARM64 APK and SHA-256 file.
