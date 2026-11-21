@@ -169,7 +169,7 @@ object WebDavManager {
                     cl.newCall(req).execute().use { resp ->
                         // 201 Created or 405 Method Not Allowed (already exists) are acceptable
                         if (resp.code != 201 && resp.code != 405 && resp.code != 409) {
-                            LogUtil.w(AppConfig.TAG, "WebDAV MKCOL $mkUrl returned ${resp.code}")
+                            LogUtil.w(AppConfig.TAG, "WebDAV MKCOL returned ${resp.code}")
                         }
                     }
                 } catch (_: Exception) {

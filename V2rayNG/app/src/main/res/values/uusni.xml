@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI (TCP)</string>
+    <string name="menu_item_import_config_manually_uusni">Type manually [UU SNI]</string>
+    <string name="uusni_obfs_key">Obfuscation value (obfs_key, 0–255)</string>
+    <string name="uusni_crypt">Encrypt target address (sni_crypt)</string>
+    <string name="uusni_hint">TCP only. Enter the captured IPv4 node, port and obfuscation value.</string>
+    <string name="uusni_invalid_config">Enter a remark, a valid IPv4 node, port 1–65535 and obfuscation value 0–255.</string>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI (TCP)</string>
+    <string name="menu_item_import_config_manually_uusni">Nhập thủ công [UU SNI]</string>
+    <string name="uusni_obfs_key">Giá trị làm rối (obfs_key, 0–255)</string>
+    <string name="uusni_crypt">Mã hóa địa chỉ đích (sni_crypt)</string>
+    <string name="uusni_hint">Chỉ hỗ trợ TCP. Nhập IPv4, cổng và giá trị làm rối của nút đã thu thập.</string>
+    <string name="uusni_invalid_config">Nhập ghi chú, IPv4 hợp lệ, cổng 1–65535 và giá trị làm rối 0–255.</string>
+</resources>

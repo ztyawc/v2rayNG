@@ -7,19 +7,19 @@ import android.os.IBinder
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.contracts.ServiceControl
 import com.v2ray.ang.core.CoreServiceManager
-import com.v2ray.ang.handler.SettingsManager
+import com.v2ray.ang.handler.AppLocaleManager
+import com.v2ray.ang.handler.NotificationManager
 import com.v2ray.ang.util.LogUtil
-import com.v2ray.ang.util.MyContextWrapper
-import java.lang.ref.SoftReference
 
 class CoreProxyOnlyService : Service(), ServiceControl {
+    private lateinit var session: CoreServiceManager.Session
     /**
      * Initializes the service.
      */
     override fun onCreate() {
         super.onCreate()
         LogUtil.i(AppConfig.TAG, "StartCore-Proxy: Service created")
-        CoreServiceManager.serviceControl = SoftReference(this)
+        session = CoreServiceManager.createSession(this, setup = { null })
     }
 
     /**
@@ -30,17 +30,17 @@ class CoreProxyOnlyService : Service(), ServiceControl {
      * @return The start mode.
      */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        LogUtil.i(AppConfig.TAG, "StartCore-Proxy: Service command received")
-        CoreServiceManager.startCoreLoop(null)
-        return START_STICKY
+        NotificationManager.ensureForeground()
+        session.start(intent)
+        return START_NOT_STICKY
     }
 
     /**
      * Destroys the service.
      */
     override fun onDestroy() {
+        session.destroy()
         super.onDestroy()
-        CoreServiceManager.stopCoreLoop()
     }
 
     /**
@@ -55,14 +55,14 @@ class CoreProxyOnlyService : Service(), ServiceControl {
      * Starts the service.
      */
     override fun startService() {
-        // do nothing
+        session.start()
     }
 
     /**
      * Stops the service.
      */
     override fun stopService() {
-        stopSelf()
+        session.requestStop()
     }
 
     /**
@@ -88,9 +88,7 @@ class CoreProxyOnlyService : Service(), ServiceControl {
      * @param newBase The new base context.
      */
     override fun attachBaseContext(newBase: Context?) {
-        val context = newBase?.let {
-            MyContextWrapper.wrap(newBase, SettingsManager.getLocale())
-        }
+        val context = newBase?.let(AppLocaleManager::localizedContext)
         super.attachBaseContext(context)
     }
 }

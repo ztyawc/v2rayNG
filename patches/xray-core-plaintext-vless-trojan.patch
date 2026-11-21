@@ -1,0 +1,303 @@
+diff --git a/infra/conf/xray.go b/infra/conf/xray.go
+--- a/infra/conf/xray.go
++++ b/infra/conf/xray.go
+@@ -229,40 +229,6 @@
+ 	if len(c.ProxySettings.Tag) > 0 && len(c.StreamSetting.SocketSettings.DialerProxy) > 0 {
+ 		return errors.New("proxySettings.tag is conflicted with sockopt.dialerProxy").AtWarning()
+ 	}
+-	return nil
+-}
+-
+-func requiresTransportSecurity(address *Address) bool {
+-	if address == nil || address.Address == nil {
+-		return false
+-	}
+-	if address.Family().IsIP() {
+-		return !geodata.GetPrivateIPMatcher().Match(address.IP())
+-	}
+-	domain := strings.TrimSuffix(strings.ToLower(address.Domain()), ".")
+-	return !geodata.GetPrivateDomainMatcher().MatchAny(domain)
+-}
+-
+-func validateOutboundTransportSecurity(rawConfig interface{}, senderSettings *proxyman.SenderConfig) error {
+-	if senderSettings.StreamSettings != nil && senderSettings.StreamSettings.GetSecurityType() != "" {
+-		return nil
+-	}
+-
+-	if vlessCfg, ok := rawConfig.(*VLessOutboundConfig); ok {
+-		if vlessCfg.Encryption != "" && vlessCfg.Encryption != "none" {
+-			return nil
+-		}
+-		if requiresTransportSecurity(vlessCfg.Address) {
+-			return errors.New("vless without TLS or other encryption is prohibited unless the server address is a private IP or domain")
+-		}
+-	}
+-
+-	if tjCfg, ok := rawConfig.(*TrojanClientConfig); ok {
+-		if requiresTransportSecurity(tjCfg.Address) {
+-			return errors.New("trojan without TLS is prohibited unless the server address is a private IP or domain")
+-		}
+-	}
+-
+ 	return nil
+ }
+ 
+@@ -359,9 +325,6 @@
+ 	if err != nil {
+ 		return nil, errors.New("failed to load outbound detour config for protocol ", c.Protocol).Base(err)
+ 	}
+-	if err := validateOutboundTransportSecurity(rawConfig, senderSettings); err != nil {
+-		return nil, err
+-	}
+ 	ts, err := rawConfig.(Buildable).Build()
+ 	if err != nil {
+ 		return nil, errors.New("failed to build outbound handler for protocol ", c.Protocol).Base(err)
+diff --git a/infra/conf/plaintext_vless_trojan_test.go b/infra/conf/plaintext_vless_trojan_test.go
+new file mode 100644
+--- /dev/null
++++ b/infra/conf/plaintext_vless_trojan_test.go
+@@ -0,0 +1,244 @@
++package conf_test
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/app/proxyman"
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/features/outbound"
++	"github.com/xtls/xray-core/infra/conf"
++	_ "github.com/xtls/xray-core/main/distro/all"
++	"github.com/xtls/xray-core/transport/internet/tls"
++)
++
++func plaintextTestOutbound(protocol, address, security, network string, legacy bool) map[string]any {
++	settings := map[string]any{"address": address, "port": 443}
++	if protocol == "vless" {
++		settings["id"] = "27848739-7e62-4138-9fd3-098a63964b6b"
++		settings["encryption"] = "none"
++		if legacy {
++			settings = map[string]any{"vnext": []any{map[string]any{
++				"address": address, "port": 443,
++				"users": []any{map[string]any{"id": settings["id"], "encryption": "none"}},
++			}}}
++		}
++	} else {
++		settings["password"] = "test-password"
++		if legacy {
++			settings = map[string]any{"servers": []any{settings}}
++		}
++	}
++	stream := map[string]any{"network": network}
++	if security != "" {
++		stream["security"] = security
++	}
++	return map[string]any{"tag": "proxy", "protocol": protocol, "settings": settings, "streamSettings": stream}
++}
++
++func buildPlaintextTestConfig(outbounds ...map[string]any) (*core.Config, error) {
++	body, err := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "none"}, "outbounds": outbounds})
++	if err != nil {
++		return nil, err
++	}
++	var config conf.Config
++	if err := json.Unmarshal(body, &config); err != nil {
++		return nil, err
++	}
++	return config.Build()
++}
++
++func TestPlaintextVlessTrojanConfig(t *testing.T) {
++	for _, protocol := range []string{"vless", "trojan"} {
++		for _, address := range []string{"9.9.9.9", "2606:4700:4700::1111", "proxy.example.net", "127.0.0.1", "proxy.local"} {
++			for _, security := range []string{"", "none"} {
++				for _, network := range []string{"tcp", "ws", "httpupgrade", "grpc"} {
++					for _, legacy := range []bool{false, true} {
++						t.Run(fmt.Sprintf("%s/%s/%s/%s/legacy=%t", protocol, address, security, network, legacy), func(t *testing.T) {
++							compiled, err := buildPlaintextTestConfig(plaintextTestOutbound(protocol, address, security, network, legacy))
++							if err != nil {
++								t.Fatal(err)
++							}
++							sender, err := compiled.Outbound[0].SenderSettings.GetInstance()
++							if err != nil {
++								t.Fatal(err)
++							}
++							if got := sender.(*proxyman.SenderConfig).StreamSettings.GetSecurityType(); got != "" {
++								t.Fatalf("plaintext profile unexpectedly enabled %s", got)
++							}
++						})
++					}
++				}
++			}
++		}
++	}
++}
++
++func TestPlaintextVlessTrojanTLS(t *testing.T) {
++	for _, protocol := range []string{"vless", "trojan"} {
++		t.Run(protocol, func(t *testing.T) {
++			out := plaintextTestOutbound(protocol, "proxy.example.net", "tls", "tcp", false)
++			out["streamSettings"].(map[string]any)["tlsSettings"] = map[string]any{"serverName": "proxy.example.net", "allowInsecure": false}
++			compiled, err := buildPlaintextTestConfig(out)
++			if err != nil {
++				t.Fatal(err)
++			}
++			sender, err := compiled.Outbound[0].SenderSettings.GetInstance()
++			if err != nil {
++				t.Fatal(err)
++			}
++			stream := sender.(*proxyman.SenderConfig).StreamSettings
++			if stream.GetSecurityType() != "xray.transport.internet.tls.Config" || len(stream.SecuritySettings) != 1 {
++				t.Fatal("TLS profile lost its TLS settings")
++			}
++			security, err := stream.SecuritySettings[0].GetInstance()
++			if err != nil {
++				t.Fatal(err)
++			}
++			cfg := security.(*tls.Config)
++			if cfg.ServerName != "proxy.example.net" {
++				t.Fatal("TLS verification settings changed")
++			}
++			out["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)["allowInsecure"] = true
++			if _, err := buildPlaintextTestConfig(out); err == nil {
++				t.Fatal("TLS certificate verification bypass unexpectedly restored")
++			}
++		})
++	}
++}
++
++func TestPlaintextVlessTrojanInvalidConfig(t *testing.T) {
++	for _, protocol := range []string{"vless", "trojan"} {
++		for _, field := range []string{"port", "credential", "security"} {
++			t.Run(protocol+"/"+field, func(t *testing.T) {
++				out := plaintextTestOutbound(protocol, "9.9.9.9", "none", "tcp", false)
++				settings := out["settings"].(map[string]any)
++				switch field {
++				case "port":
++					settings["port"] = 70000
++				case "credential":
++					if protocol == "vless" {
++						settings["id"] = "this-is-not-a-uuid-and-is-longer-than-thirty-bytes"
++					} else {
++						settings["password"] = ""
++					}
++				case "security":
++					out["streamSettings"].(map[string]any)["security"] = "unknown"
++				}
++				if _, err := buildPlaintextTestConfig(out); err == nil {
++					t.Fatal("invalid configuration accepted")
++				}
++			})
++		}
++	}
++}
++
++// Use a public logical proxy address and a freedom dialer redirect to keep all
++// socket traffic on loopback while exercising the actual native outbound.
++func TestPlaintextVlessTrojanTCP(t *testing.T) {
++	for _, protocol := range []string{"vless", "trojan"} {
++		for _, security := range []string{"", "none"} {
++			t.Run(protocol+"/"+security, func(t *testing.T) {
++				listener, err := net.Listen("tcp", "127.0.0.1:0")
++				if err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { listener.Close() })
++				out := plaintextTestOutbound(protocol, "9.9.9.9", security, "tcp", false)
++				out["streamSettings"].(map[string]any)["sockopt"] = map[string]any{"dialerProxy": "relay"}
++				relay := map[string]any{"tag": "relay", "protocol": "freedom", "settings": map[string]any{"redirect": listener.Addr().String()}}
++				compiled, err := buildPlaintextTestConfig(out, relay)
++				if err != nil {
++					t.Fatal(err)
++				}
++				instance, err := core.New(compiled)
++				if err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { instance.Close() })
++				if err := instance.Start(); err != nil {
++					t.Fatal(err)
++				}
++				manager := instance.GetFeature(outbound.ManagerType()).(outbound.Manager)
++				if manager.GetHandler("proxy") == nil {
++					t.Fatal("native outbound not registered")
++				}
++				payload := []byte("plaintext-native-round-trip")
++				var request, response []byte
++				if protocol == "vless" {
++					id, err := hex.DecodeString("278487397e6241389fd3098a63964b6b")
++					if err != nil {
++						t.Fatal(err)
++					}
++					request = append([]byte{0}, id...)
++					request = append(request, 0, 1, 0x1f, 0x90, 1, 127, 0, 0, 1)
++					response = []byte{0, 0}
++				} else {
++					key := sha256.Sum224([]byte("test-password"))
++					request = []byte(hex.EncodeToString(key[:]) + "\r\n")
++					request = append(request, 1, 1, 127, 0, 0, 1, 0x1f, 0x90, '\r', '\n')
++				}
++				request = append(request, payload...)
++				response = append(response, payload...)
++				serverDone := make(chan error, 1)
++				go func() {
++					conn, err := listener.Accept()
++					if err != nil {
++						serverDone <- err
++						return
++					}
++					defer conn.Close()
++					if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++						serverDone <- err
++						return
++					}
++					got := make([]byte, len(request))
++					if _, err := io.ReadFull(conn, got); err != nil {
++						serverDone <- err
++						return
++					}
++					if !bytes.Equal(got, request) {
++						serverDone <- fmt.Errorf("unexpected plaintext protocol request")
++						return
++					}
++					_, err = conn.Write(response)
++					serverDone <- err
++				}()
++				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++				defer cancel()
++				conn, err := core.Dial(ctx, instance, xnet.TCPDestination(xnet.LocalHostIP, 8080))
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer conn.Close()
++				if _, err := conn.Write(payload); err != nil {
++					t.Fatal(err)
++				}
++				got := make([]byte, len(payload))
++				if _, err := io.ReadFull(conn, got); err != nil {
++					t.Fatal(err)
++				}
++				if !bytes.Equal(got, payload) {
++					t.Fatal("native response payload changed")
++				}
++				select {
++				case err := <-serverDone:
++					if err != nil {
++						t.Fatal(err)
++					}
++				case <-ctx.Done():
++					t.Fatal(ctx.Err())
++				}
++			})
++		}
++	}
++}

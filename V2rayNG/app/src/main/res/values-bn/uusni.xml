@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI (TCP)</string>
+    <string name="menu_item_import_config_manually_uusni">ম্যানুয়ালি লিখুন [UU SNI]</string>
+    <string name="uusni_obfs_key">অবফাসকেশন মান (obfs_key, 0–255)</string>
+    <string name="uusni_crypt">গন্তব্য ঠিকানা এনক্রিপ্ট করুন (sni_crypt)</string>
+    <string name="uusni_hint">শুধু TCP। সংগৃহীত নোডের IPv4, পোর্ট এবং অবফাসকেশন মান লিখুন।</string>
+    <string name="uusni_invalid_config">একটি মন্তব্য, সঠিক IPv4, 1–65535 পোর্ট এবং 0–255 অবফাসকেশন মান লিখুন।</string>
+</resources>

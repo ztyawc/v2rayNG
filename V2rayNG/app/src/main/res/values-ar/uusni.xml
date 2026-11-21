@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_uusni">UU SNI (TCP)</string>
+    <string name="menu_item_import_config_manually_uusni">إدخال يدوي [UU SNI]</string>
+    <string name="uusni_obfs_key">قيمة التمويه (obfs_key، 0–255)</string>
+    <string name="uusni_crypt">تشفير عنوان الوجهة (sni_crypt)</string>
+    <string name="uusni_hint">يدعم TCP فقط. أدخل عنوان IPv4 للعقدة والمنفذ وقيمة التمويه التي التقطتها.</string>
+    <string name="uusni_invalid_config">أدخل ملاحظة وعنوان IPv4 صالحًا ومنفذًا من 1 إلى 65535 وقيمة تمويه من 0 إلى 255.</string>
+</resources>

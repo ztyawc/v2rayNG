@@ -13,6 +13,11 @@ import java.net.UnknownHostException
 
 object SpeedtestManager {
 
+    data class RemoteEndpointInfo(
+        val country: String?,
+        val ipAddress: String?,
+    )
+
     /**
      * Measures the time taken to establish a TCP connection to a given URL and port.
      *
@@ -30,11 +35,11 @@ object SpeedtestManager {
 
             return System.currentTimeMillis() - start
         } catch (e: UnknownHostException) {
-            LogUtil.e(AppConfig.TAG, "Unknown host: $url", e)
+            LogUtil.e(AppConfig.TAG, "Speed test host resolution failed", e)
         } catch (e: IOException) {
-            LogUtil.e(AppConfig.TAG, "socketConnectTime IOException: ${e.message}")
+            LogUtil.e(AppConfig.TAG, "Speed test socket connection failed", e)
         } catch (e: Exception) {
-            LogUtil.e(AppConfig.TAG, "Failed to establish socket connection to $url:$port", e)
+            LogUtil.e(AppConfig.TAG, "Speed test socket connection failed", e)
         } finally {
             socket?.let { s ->
                 try {
@@ -48,7 +53,7 @@ object SpeedtestManager {
         return -1
     }
 
-    fun getRemoteIPInfo(): String? {
+    fun getRemoteIPInfo(): RemoteEndpointInfo? {
         val url = MmkvManager.decodeSettingsString(AppConfig.PREF_IP_API_URL)
             .takeIf { !it.isNullOrBlank() } ?: AppConfig.IP_API_URL
 
@@ -81,6 +86,9 @@ object SpeedtestManager {
             ipInfo.location?.country_code
         ).firstOrNull { !it.isNullOrBlank() }
 
-        return "(${country ?: "unknown"}) ${ip ?: "unknown"}"
+        return RemoteEndpointInfo(
+            country = country,
+            ipAddress = ip,
+        )
     }
 }

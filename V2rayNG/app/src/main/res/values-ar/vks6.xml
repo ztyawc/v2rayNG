@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_vks6">VK S6 (TCP)</string>
+    <string name="menu_item_import_config_manually_vks6">إدخال يدوي [VK S6]</string>
+    <string name="vks6_port_end">آخر منفذ للعقدة (اختياري)</string>
+    <string name="vks6_username">اسم مستخدم الجلسة</string>
+    <string name="vks6_password">كلمة مرور الجلسة</string>
+    <string name="vks6_hint">TCP/IPv4 فقط. أدخل العقدة وبيانات الجلسة الحالية من VK. اترك آخر منفذ فارغًا لاستخدام منفذ ثابت.</string>
+    <string name="vks6_invalid_config">أدخل ملاحظة وعقدة IPv4 صالحة ومنافذ 1–65535 بترتيب تصاعدي وبيانات جلسة بطول 1–255 بايت UTF-8 لكل حقل.</string>
+</resources>

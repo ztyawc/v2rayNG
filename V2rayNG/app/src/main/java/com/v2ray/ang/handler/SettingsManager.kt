@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.res.AssetManager
 import android.os.Build
 import android.text.TextUtils
-import androidx.appcompat.app.AppCompatDelegate
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.AppConfig.ANG_PACKAGE
 import com.v2ray.ang.AppConfig.DEFAULT_SUBSCRIPTION_ID
@@ -17,9 +16,9 @@ import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.RulesetItem
 import com.v2ray.ang.dto.entities.SubscriptionItem
 import com.v2ray.ang.enums.EConfigType
-import com.v2ray.ang.enums.Language
 import com.v2ray.ang.enums.RoutingType
 import com.v2ray.ang.enums.VpnInterfaceAddressConfig
+import com.v2ray.ang.extension.moveItem
 import com.v2ray.ang.handler.MmkvManager.decodeAllServerList
 import com.v2ray.ang.handler.MmkvManager.decodeServerConfig
 import com.v2ray.ang.handler.MmkvManager.decodeSubsList
@@ -31,14 +30,10 @@ import com.v2ray.ang.util.LogUtil
 import com.v2ray.ang.util.Utils
 import java.io.File
 import java.io.FileOutputStream
-import java.util.Collections
-import java.util.Locale
-import kotlin.random.Random
 
 object SettingsManager {
 
-    @Volatile
-    private var runtimeSocksPort: Int? = null
+    private const val RUNTIME_SOCKS_PORT = "runtime_socks_port"
 
     fun initApp(context: Context) {
         ensureDefaultSettings()
@@ -63,12 +58,11 @@ object SettingsManager {
     /**
      * Get preset routing rulesets.
      * @param context The application context.
-     * @param index The index of the routing type.
+     * @param type The routing preset type.
      * @return A mutable list of RulesetItem.
      */
-    private fun getPresetRoutingRulesets(context: Context, index: Int = 0): MutableList<RulesetItem>? {
-        val fileName = RoutingType.fromIndex(index).fileName
-        val assets = Utils.readTextFromAssets(context, fileName)
+    private fun getPresetRoutingRulesets(context: Context, type: RoutingType = RoutingType.WHITE): MutableList<RulesetItem>? {
+        val assets = Utils.readTextFromAssets(context, type.fileName)
         if (TextUtils.isEmpty(assets)) {
             return null
         }
@@ -79,10 +73,10 @@ object SettingsManager {
     /**
      * Reset routing rulesets from presets.
      * @param context The application context.
-     * @param index The index of the routing type.
+     * @param type The routing preset type.
      */
-    fun resetRoutingRulesetsFromPresets(context: Context, index: Int) {
-        val rulesetList = getPresetRoutingRulesets(context, index) ?: return
+    fun resetRoutingRulesetsFromPresets(context: Context, type: RoutingType) {
+        val rulesetList = getPresetRoutingRulesets(context, type) ?: return
         resetRoutingRulesetsCommon(rulesetList)
     }
 
@@ -180,7 +174,7 @@ object SettingsManager {
      * @return True if bypassing LAN, false otherwise.
      */
     fun routingRulesetsBypassLan(): Boolean {
-        val vpnBypassLan = MmkvManager.decodeSettingsString(AppConfig.PREF_VPN_BYPASS_LAN) ?: "1"
+        val vpnBypassLan = MmkvManager.decodeSettingsString(AppConfig.PREF_VPN_BYPASS_LAN, AppConfig.DEFAULT_VPN_BYPASS_LAN)
         if (vpnBypassLan == "1") {
             return true
         } else if (vpnBypassLan == "2") {
@@ -203,32 +197,6 @@ object SettingsManager {
             it.domain?.contains(GEOSITE_PRIVATE) == true || it.ip?.contains(GEOIP_PRIVATE) == true
         }
         return exist == true
-    }
-
-    /**
-     * Swap routing rulesets.
-     * @param fromPosition The position to swap from.
-     * @param toPosition The position to swap to.
-     */
-    fun swapRoutingRuleset(fromPosition: Int, toPosition: Int) {
-        val rulesetList = MmkvManager.decodeRoutingRulesets()
-        if (rulesetList.isNullOrEmpty()) return
-
-        Collections.swap(rulesetList, fromPosition, toPosition)
-        MmkvManager.encodeRoutingRulesets(rulesetList)
-    }
-
-    /**
-     * Swap subscriptions.
-     * @param fromPosition The position to swap from.
-     * @param toPosition The position to swap to.
-     */
-    fun swapSubscriptions(fromPosition: Int, toPosition: Int) {
-        val subsList = decodeSubsList()
-        if (subsList.isEmpty()) return
-
-        Collections.swap(subsList, fromPosition, toPosition)
-        MmkvManager.encodeSubsList(subsList)
     }
 
     /**
@@ -289,7 +257,7 @@ object SettingsManager {
     fun getSocksPort(): Int {
         val port =
             if (IsDynamicSocksPort()) {
-                runtimeSocksPort ?: refreshRuntimeSocksPort()
+                MmkvManager.decodeSettingsString(RUNTIME_SOCKS_PORT)?.toIntOrNull()
             } else {
                 Utils.parseInt(MmkvManager.decodeSettingsString(AppConfig.PREF_SOCKS_PORT), AppConfig.PORT_SOCKS.toInt())
             }
@@ -299,10 +267,16 @@ object SettingsManager {
     @Synchronized
     fun refreshRuntimeSocksPort(): Int? {
         if (IsDynamicSocksPort()) {
-            runtimeSocksPort = generateRandomSocksPort()
-            return runtimeSocksPort
+            // Only the daemon's serialized setup allocates; every process reads this same value.
+            val port = Utils.findRandomFreePort()
+            check(MmkvManager.encodeSettings(RUNTIME_SOCKS_PORT, port.toString())) { "Failed to publish runtime SOCKS port" }
+            return port
         }
         return null
+    }
+
+    fun clearRuntimeSocksPort() {
+        check(MmkvManager.encodeSettings(RUNTIME_SOCKS_PORT, null as String?)) { "Failed to clear runtime SOCKS port" }
     }
 
     fun getSocksUsername(): String? {
@@ -325,34 +299,66 @@ object SettingsManager {
         return MmkvManager.decodeSettingsBool(AppConfig.PREF_DYNAMIC_SOCKS_PORT, false)
     }
 
-    private fun generateRandomSocksPort(): Int {
-        return Random.nextInt(10000, 65535)
-    }
-
     /**
      * Initialize assets.
      * @param context The application context.
      * @param assets The AssetManager.
      */
-    fun initAssets(context: Context, assets: AssetManager) {
+    fun initAssets(context: Context, assets: AssetManager): Boolean {
         val extFolder = Utils.userAssetPath(context)
-
         try {
             val geo = arrayOf(AppConfig.GEOSITE_DAT, AppConfig.GEOIP_DAT, AppConfig.GEOIP_ONLY_CN_PRIVATE_DAT)
-            assets.list("")
-                ?.filter { geo.contains(it) }
-                ?.filter { !File(extFolder, it).exists() }
-                ?.forEach {
-                    val target = File(extFolder, it)
-                    assets.open(it).use { input ->
-                        FileOutputStream(target).use { output ->
-                            input.copyTo(output)
-                        }
+            // UI and daemon can initialize together. Serialize writers across processes,
+            // and publish each bundled asset only after its complete contents are durable.
+            synchronized(this) {
+                FileOutputStream(File(extFolder, ".bundled-assets.lock"), true).channel.use { channel ->
+                    channel.lock().use {
+                        installBundledAssets(geo.map { File(extFolder, it) }) { assets.open(it.name) }
                     }
-                    LogUtil.i(AppConfig.TAG, "Copied from apk assets folder to ${target.absolutePath}")
                 }
+            }
+            return true
         } catch (e: Exception) {
             LogUtil.e(ANG_PACKAGE, "asset copy failed", e)
+            return false
+        }
+    }
+
+    internal fun installBundledAssets(targets: List<File>, open: (File) -> java.io.InputStream) {
+        val missing = targets.filter { !it.isFile || it.length() == 0L }
+        check(missing.none { it.exists() && !it.isFile }) { "Invalid bundled asset destination" }
+        val previouslyEmpty = missing.filter { it.exists() }.toSet()
+        try {
+            missing.forEach { target -> installBundledAsset(target) { open(target) } }
+        } catch (failure: Exception) {
+            missing.forEach { target ->
+                try {
+                    if (target in previouslyEmpty) {
+                        FileOutputStream(target).use { it.fd.sync() }
+                    } else {
+                        check(!target.exists() || target.delete()) { "Unable to roll back bundled asset" }
+                    }
+                } catch (rollbackFailure: Exception) {
+                    failure.addSuppressed(rollbackFailure)
+                }
+            }
+            throw failure
+        }
+    }
+
+    internal fun installBundledAsset(target: File, open: () -> java.io.InputStream) {
+        if (target.isFile && target.length() > 0) return
+        val temporary = File.createTempFile(target.name, ".tmp", target.parentFile)
+        try {
+            open().use { input ->
+                FileOutputStream(temporary).use { output ->
+                    input.copyTo(output)
+                    output.fd.sync()
+                }
+            }
+            check(temporary.length() > 0 && temporary.renameTo(target)) { "Unable to publish bundled asset" }
+        } finally {
+            temporary.delete()
         }
     }
 
@@ -414,40 +420,6 @@ object SettingsManager {
     fun getRealPingConcurrency(): Int {
         val value = MmkvManager.decodeSettingsString(AppConfig.PREF_REAL_PING_CONCURRENCY)?.toIntOrNull() ?: 16
         return value.coerceIn(1, 128)
-    }
-
-    /**
-     * Get the locale.
-     * @return The locale.
-     */
-    fun getLocale(): Locale {
-        val langCode =
-            MmkvManager.decodeSettingsString(AppConfig.PREF_LANGUAGE) ?: Language.AUTO.code
-        val language = Language.fromCode(langCode)
-
-        return when (language) {
-            Language.AUTO -> Utils.getSysLocale()
-            Language.ENGLISH -> Locale.ENGLISH
-            Language.CHINA -> Locale.CHINA
-            Language.TRADITIONAL_CHINESE -> Locale.TRADITIONAL_CHINESE
-            Language.VIETNAMESE -> Locale.forLanguageTag("vi")
-            Language.RUSSIAN -> Locale.forLanguageTag("ru")
-            Language.PERSIAN -> Locale.forLanguageTag("fa")
-            Language.ARABIC -> Locale.forLanguageTag("ar")
-            Language.BANGLA -> Locale.forLanguageTag("bn")
-            Language.BAKHTIARI -> Locale.forLanguageTag("bqi-IR")
-        }
-    }
-
-    /**
-     * Set night mode.
-     */
-    fun setNightMode() {
-        when (MmkvManager.decodeSettingsString(AppConfig.PREF_UI_MODE_NIGHT, "0")) {
-            "0" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
-            "1" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
-            "2" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
-        }
     }
 
     /**
@@ -531,10 +503,15 @@ object SettingsManager {
         ensureDefaultValue(AppConfig.PREF_IP_API_URL, AppConfig.IP_API_URL)
         ensureDefaultValue(AppConfig.PREF_HEV_TUNNEL_RW_TIMEOUT, AppConfig.HEVTUN_RW_TIMEOUT)
         ensureDefaultValue(AppConfig.PREF_MUX_CONCURRENCY, "8")
-        ensureDefaultValue(AppConfig.PREF_MUX_XUDP_CONCURRENCY, "8")
+        ensureDefaultValue(AppConfig.PREF_MUX_XUDP_CONCURRENCY, AppConfig.DEFAULT_MUX_XUDP_CONCURRENCY)
         ensureDefaultValue(AppConfig.PREF_FRAGMENT_LENGTH, "50-100")
         ensureDefaultValue(AppConfig.PREF_FRAGMENT_INTERVAL, "10-20")
         ensureDefaultValue(AppConfig.PREF_FRAGMENT_MAXSPLIT, "10")
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_PING_INTERVAL, AppConfig.OBSERVATORY_LEAST_PING_INTERVAL)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_INTERVAL, AppConfig.OBSERVATORY_LEAST_LOAD_INTERVAL)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_METHOD, AppConfig.OBSERVATORY_LEAST_LOAD_METHOD)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_SAMPLING, AppConfig.OBSERVATORY_LEAST_LOAD_SAMPLING)
+        ensureDefaultValue(AppConfig.PREF_OBSERVATORY_LEAST_LOAD_TIMEOUT, AppConfig.OBSERVATORY_LEAST_LOAD_TIMEOUT)
     }
 
     private fun ensureDefaultValue(key: String, default: String) {
@@ -610,7 +587,7 @@ object SettingsManager {
 
         // Update each subscription's serverList (including default subscription)
         subscriptionServerMap.forEach { (subId, serverGuids) ->
-            MmkvManager.encodeServerList(serverGuids, subId)
+            MmkvManager.reorderServerList(serverGuids, subId)
         }
 
 
@@ -630,10 +607,10 @@ object SettingsManager {
             )
             encodeSubscription(DEFAULT_SUBSCRIPTION_ID, defaultSub)
 
-            // Move top
+            // Move to the top
             val subsList = decodeSubsList()
-            if (subsList.count() > 1) {
-                swapSubscriptions(0, subsList.count() - 1)
+            if (subsList.moveItem(subsList.lastIndex, 0)) {
+                MmkvManager.encodeSubsList(subsList)
             }
         }
     }

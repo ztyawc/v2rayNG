@@ -1,0 +1,373 @@
+diff --git a/proxy/qyproxy/client.go b/proxy/qyproxy/client.go
+--- a/proxy/qyproxy/client.go
++++ b/proxy/qyproxy/client.go
+@@ -39,8 +39,8 @@
+ }
+ 
+ func Options(config *Config) (qt.Options, error) {
+-	if config == nil || config.Port == 0 || config.Port > 65535 || (config.Role != qt.CN2 && config.Role != qt.CN2Download) {
+-		return qt.Options{}, errors.New("qyproxy: valid control port and cn2/cn2_download role required")
++	if config == nil || config.Port == 0 || config.Port > 65535 || (config.Role != qt.Primary && config.Role != qt.CN2 && config.Role != qt.CN2Download) {
++		return qt.Options{}, errors.New("qyproxy: valid control port and primary/cn2/cn2_download role required")
+ 	}
+ 	o := qt.Options{Server: config.Address, Port: uint16(config.Port), Role: config.Role,
+ 		Username: config.User, Password: config.Password, SN: config.Sn,
+diff --git a/proxy/qyproxy/client_test.go b/proxy/qyproxy/client_test.go
+--- a/proxy/qyproxy/client_test.go
++++ b/proxy/qyproxy/client_test.go
+@@ -14,6 +14,7 @@
+ 	"testing"
+ 	"time"
+ 
++	"github.com/miekg/dns"
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/buf"
+ 	xnet "github.com/xtls/xray-core/common/net"
+@@ -65,6 +66,7 @@
+ type mockNode struct {
+ 	t                *testing.T
+ 	role             string
++	password         string
+ 	control, data    net.Listener
+ 	udp              *net.UDPConn
+ 	token            []byte
+@@ -94,6 +96,10 @@
+ 		t.Fatal(err)
+ 	}
+ 	n := &mockNode{t: t, role: role, control: c, data: d, udp: u, token: []byte("0123456789abcdef"), controlGone: make(chan struct{})}
++	n.password = "test-secret"
++	if role == "primary" {
++		n.password = "personal-node-password"
++	}
+ 	n.wg.Add(3)
+ 	go n.accept(c, n.login)
+ 	go n.accept(d, n.tcp)
+@@ -172,7 +178,11 @@
+ 		return
+ 	}
+ 	opts := tlvs(req[5:], true)
+-	for k, want := range map[byte]string{8: n.role, 13: "hk", 14: n.role} {
++	area, zone := n.role, n.role
++	if n.role == "primary" {
++		area, zone = "hk", "sg"
++	}
++	for k, want := range map[byte]string{8: area, 13: "hk", 14: zone} {
+ 		if len(opts[k]) != 1 || string(opts[k][0][1:]) != want {
+ 			n.t.Error("role configure fields", k)
+ 			return
+@@ -181,6 +191,9 @@
+ 	tcp := n.data.Addr().(*net.TCPAddr).Port
+ 	udp := n.udp.LocalAddr().(*net.UDPAddr).Port
+ 	ack := []byte{3, 4, 4, 5, 4, 6, byte(tcp >> 8), byte(tcp), byte(udp >> 8), byte(udp)}
++	if n.role == "primary" {
++		ack = append(ack, 9, 12, 9, '1', '2', '7', '.', '0', '.', '0', '.', '1', 18, 4, 0x17, 0xa5)
++	}
+ 	challenge := []byte{3, 'a', 'b', 'c'}
+ 	_, e = s.Write(append(frame(1, 2, 0, ack), frame(4, 1, 17, challenge)...))
+ 	if e != nil {
+@@ -190,13 +203,23 @@
+ 	if e != nil {
+ 		return
+ 	}
+-	want := md5.Sum(append([]byte{17}, []byte("test-secretabc")...))
++	want := md5.Sum(append([]byte{17}, []byte(n.password+"abc")...))
+ 	if len(response) < 22 || response[0] != 4 || response[1] != 2 || response[2] != 17 || response[5] != 16 || !bytes.Equal(response[6:22], want[:]) || string(response[22:]) != "test-user&20&456&test-device" {
+ 		n.t.Error("CHAP digest or composed username")
+ 		return
+ 	}
+ 	n.logins.Add(1)
+-	_, e = s.Write(frame(4, 5, 17, append([]byte{0, 0, 16}, n.token...)))
++	code := byte(5)
++	material := append([]byte{0, 0, 16}, n.token...)
++	if n.role == "primary" {
++		code = 7
++		inner := append([]byte{2, 16}, n.token...)
++		laterToken := []byte("later-auth-token-is-independent")
++		inner = append(inner, 3, byte(len(laterToken)))
++		inner = append(inner, laterToken...)
++		material = append([]byte{0, 0, byte(len(inner))}, inner...)
++	}
++	_, e = s.Write(frame(4, code, 17, material))
+ 	if e != nil {
+ 		return
+ 	}
+@@ -221,7 +244,15 @@
+ 		return mask, false
+ 	}
+ 	opts := tlvs(b[6:], false)
+-	if len(opts[1]) != 1 || !bytes.Equal(opts[1][0], n.token) || len(opts[10]) != 1 || string(opts[10][0]) != n.role || len(opts[kind]) != 1 || len(opts[kind][0]) != 8 {
++	area, mtu := n.role, uint16(1200)
++	if n.role == "primary" {
++		area, mtu = "hk", 1400
++	}
++	if len(opts[1]) != 1 || !bytes.Equal(opts[1][0], n.token) || len(opts[10]) != 1 || string(opts[10][0]) != area || len(opts[kind]) != 1 || len(opts[kind][0]) != 8 {
++		return mask, false
++	}
++	if len(opts[7]) != 1 || len(opts[7][0]) != 2 || binary.BigEndian.Uint16(opts[7][0]) != mtu {
++		n.t.Error("role data MTU")
+ 		return mask, false
+ 	}
+ 	if kind == 8 && len(opts[2]) != 2 {
+@@ -312,7 +343,8 @@
+ 			_, _ = n.udp.WriteToUDP(ack, from)
+ 			continue
+ 		}
+-		if _, ok := masks[from.String()]; !ok {
++		mask, ok := masks[from.String()]
++		if !ok {
+ 			n.t.Error("UDP before init")
+ 			continue
+ 		}
+@@ -320,15 +352,51 @@
+ 			n.t.Error("UDP header")
+ 			continue
+ 		}
++		port := binary.BigEndian.Uint16(b[4:6])
++		if port == 53 || port == 6053 {
++			payload := append([]byte{}, b[10:size]...)
++			for i := range payload {
++				payload[i] ^= mask[i%8]
++			}
++			if n.role == "primary" {
++				if port != 6053 || !bytes.Equal(b[6:10], []byte{127, 0, 0, 1}) || !bytes.HasPrefix(payload, []byte{1, 2, 'h', 'k'}) {
++					n.t.Error("primary DNS endpoint or area prefix")
++					continue
++				}
++				payload = payload[4:]
++			} else if port != 53 || !bytes.Equal(b[6:10], []byte{1, 1, 1, 1}) {
++				n.t.Error("CN2 DNS endpoint")
++				continue
++			}
++			var query dns.Msg
++			if err := query.Unpack(payload); err != nil || len(query.Question) != 1 {
++				n.t.Error("malformed DNS query or unexpected CN2 prefix")
++				continue
++			}
++			reply := new(dns.Msg)
++			reply.SetReply(&query)
++			reply.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: query.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30}, A: net.IPv4(192, 0, 2, 1)}}
++			payload, err := reply.Pack()
++			if err != nil {
++				n.t.Error(err)
++				continue
++			}
++			for i := range payload {
++				payload[i] ^= mask[i%8]
++			}
++			wire := append(append([]byte{}, b[:10]...), payload...)
++			_, _ = n.udp.WriteToUDP(wire, from)
++			continue
++		}
+ 		_, _ = n.udp.WriteToUDP(b[:size], from)
+ 	}
+ }
+ func (n *mockNode) client() *Client {
+-	return &Client{config: &Config{Address: "127.0.0.1", Port: uint32(n.control.Addr().(*net.TCPAddr).Port), User: "test-user", Password: "test-secret", Role: n.role, Sn: "test-device", GameId: 456, ServerId: 123, GameArea: "hk"}, policy: testPolicy{}}
++	return &Client{config: &Config{Address: "127.0.0.1", Port: uint32(n.control.Addr().(*net.TCPAddr).Port), User: "test-user", Password: n.password, Role: n.role, Sn: "test-device", GameId: 456, ServerId: 123, GameArea: "hk", Zone: "sg"}, policy: testPolicy{}}
+ }
+ 
+ func TestNativeTCPUDPSharedControlAndClose(t *testing.T) {
+-	for _, role := range []string{"cn2", "cn2_download"} {
++	for _, role := range []string{"primary", "cn2", "cn2_download"} {
+ 		t.Run(role, func(t *testing.T) {
+ 			n := newMockNode(t, role)
+ 			client := n.client()
+@@ -338,6 +406,9 @@
+ 			up, input := pipe.New()
+ 			output, down := pipe.New()
+ 			target := xnet.TCPDestination(xnet.ParseAddress("192.0.2.1"), 80)
++			if role == "primary" {
++				target.Address = xnet.DomainAddress("primary.example.test")
++			}
+ 			request := session.ContextWithOutbounds(ctx, []*session.Outbound{{Target: target, Tag: "fixture"}})
+ 			done := make(chan error, 1)
+ 			go func() {
+@@ -386,6 +457,34 @@
+ 				}
+ 				buf.ReleaseMulti(mb)
+ 			}
++			query := new(dns.Msg)
++			query.SetQuestion("native.example.test.", dns.TypeA)
++			query.Id = 42
++			queryBytes, err := query.Pack()
++			if err != nil {
++				t.Fatal(err)
++			}
++			b := buf.New()
++			b.Write(queryBytes)
++			dnsTarget := xnet.UDPDestination(xnet.ParseAddress("8.8.8.8"), 53)
++			b.UDP = &dnsTarget
++			if err := input.WriteMultiBuffer(buf.MultiBuffer{b}); err != nil {
++				t.Fatal(err)
++			}
++			mb, err := output.ReadMultiBuffer()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if len(mb) != 1 || mb[0].UDP == nil || *mb[0].UDP != dnsTarget {
++				buf.ReleaseMulti(mb)
++				t.Fatal("DNS original resolver endpoint lost")
++			}
++			var replyDNS dns.Msg
++			err = replyDNS.Unpack(mb[0].Bytes())
++			buf.ReleaseMulti(mb)
++			if err != nil || replyDNS.Id != 42 || !replyDNS.Response || len(replyDNS.Answer) != 1 || len(replyDNS.Question) != 1 || replyDNS.Question[0] != query.Question[0] {
++				t.Fatal("DNS reply, question or original transaction ID lost", err)
++			}
+ 			if n.logins.Load() != 1 {
+ 				t.Fatal("TCP and UDP did not share one authentication")
+ 			}
+diff --git a/infra/conf/qyproxy_test.go b/infra/conf/qyproxy_test.go
+--- a/infra/conf/qyproxy_test.go
++++ b/infra/conf/qyproxy_test.go
+@@ -8,7 +8,7 @@
+ )
+ 
+ func TestQyProxyConfig(t *testing.T) {
+-	for _, role := range []string{"cn2", "cn2_download"} {
++	for _, role := range []string{"primary", "cn2", "cn2_download"} {
+ 		c := QyProxyConfig{Address: "198.51.100.7", Port: 7025, User: "test-user", Password: "test-secret", Role: role, SN: "test-device", GameID: 456, ServerID: 123, GameArea: "hk"}
+ 		out, err := c.Build()
+ 		if err != nil {
+@@ -18,7 +18,7 @@
+ 		if config.Role != role || config.GameId != 456 || config.ServerId != 123 || config.Password != "test-secret" {
+ 			t.Fatal("negotiation fields lost")
+ 		}
+-		c.Role = "primary"
++		c.Role = "unknown"
+ 		if _, err = c.Build(); err == nil {
+ 			t.Fatal("unsupported role accepted")
+ 		}
+diff --git a/infra/conf/qyproxy_core_test.go b/infra/conf/qyproxy_core_test.go
+--- a/infra/conf/qyproxy_core_test.go
++++ b/infra/conf/qyproxy_core_test.go
+@@ -14,7 +14,7 @@
+ // Exercise JSON loading, protobuf registration, native factory creation and
+ // core-owned Close together. Authentication remains lazy until the first flow.
+ func TestQyProxyCoreConfig(t *testing.T) {
+-	for _, role := range []string{"cn2", "cn2_download"} {
++	for _, role := range []string{"primary", "cn2", "cn2_download"} {
+ 		t.Run(role, func(t *testing.T) {
+ 			body := fmt.Sprintf(`{"log":{"loglevel":"none"},"outbounds":[{"tag":"proxy","protocol":"qyproxy","settings":{"address":"198.51.100.7","port":7025,"user":"test-user","password":"test-secret","role":%q,"sn":"test-device","gameId":456,"serverId":123,"gameArea":"hk"},"mux":{"enabled":false}}]}`, role)
+ 			var config conf.Config
+diff --git a/proxy/qyproxy/transport/primary_test.go b/proxy/qyproxy/transport/primary_test.go
+new file mode 100644
+--- /dev/null
++++ b/proxy/qyproxy/transport/primary_test.go
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-3.0-only
++package qyproxy
++
++import (
++	"bytes"
++	"errors"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/miekg/dns"
++)
++
++func TestRoleUDPFrameBudgets(t *testing.T) {
++	for _, test := range []struct {
++		role string
++		code byte
++		max  int
++	}{{Primary, 7, 1390}, {CN2, 5, 1190}, {CN2Download, 5, 1190}} {
++		t.Run(test.role, func(t *testing.T) {
++			n := newTestNode(t, test.role, test.code)
++			client := n.client(t)
++			conn, err := client.ListenPacket(t.Context())
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer conn.Close()
++			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++				t.Fatal(err)
++			}
++			target := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 5), Port: 3478}
++			payload := bytes.Repeat([]byte{0x5a}, test.max)
++			if size, err := conn.WriteTo(payload, target); err != nil || size != len(payload) {
++				t.Fatal("largest unfragmented UDP payload rejected", size, err)
++			}
++			got := make([]byte, len(payload))
++			size, from, err := conn.ReadFrom(got)
++			if err != nil || size != len(payload) || from.String() != target.String() || !bytes.Equal(got, payload) {
++				t.Fatal("largest UDP payload changed", size, err)
++			}
++			if _, err := conn.WriteTo(append(payload, 0), target); !errors.Is(err, ErrOversize) {
++				t.Fatal("oversize UDP payload did not fail explicitly", err)
++			}
++		})
++	}
++}
++
++func TestPrimaryDNSPrefixConsumesFrameBudget(t *testing.T) {
++	n := newTestNode(t, Primary, 7)
++	client := n.client(t)
++	conn, err := client.ListenPacket(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	query := new(dns.Msg)
++	query.SetQuestion("budget.example.test.", dns.TypeA)
++	query.Id = 42
++	padding := &dns.EDNS0_PADDING{}
++	query.Extra = []dns.RR{&dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT, Class: 4096}, Option: []dns.EDNS0{padding}}}
++	wire, err := query.Pack()
++	if err != nil {
++		t.Fatal(err)
++	}
++	// The primary IPv4 frame has a ten-byte header and a 01/length/area DNS prefix.
++	limit := 1400 - 10 - 2 - len(n.o.GameArea)
++	padding.Padding = make([]byte, limit-len(wire))
++	wire, err = query.Pack()
++	if err != nil || len(wire) != limit {
++		t.Fatal("invalid boundary DNS fixture", len(wire), err)
++	}
++	target := &net.UDPAddr{IP: net.IPv4(8, 8, 8, 8), Port: 53}
++	if size, err := conn.WriteTo(wire, target); err != nil || size != limit {
++		t.Fatal("boundary primary DNS query rejected", size, err)
++	}
++	buffer := make([]byte, 4096)
++	size, from, err := conn.ReadFrom(buffer)
++	if err != nil || from.String() != target.String() {
++		t.Fatal("primary DNS resolver endpoint lost", err)
++	}
++	var reply dns.Msg
++	if err := reply.Unpack(buffer[:size]); err != nil || reply.Id != 42 || !reply.Response {
++		t.Fatal("primary DNS transaction was not restored", err)
++	}
++	padding.Padding = append(padding.Padding, 0)
++	wire, err = query.Pack()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := conn.WriteTo(wire, target); !errors.Is(err, ErrOversize) {
++		t.Fatal("DNS area prefix escaped the frame budget", err)
++	}
++	pc := conn.(*packetConn)
++	pc.mu.Lock()
++	pending := len(pc.pending)
++	pc.mu.Unlock()
++	if pending != 0 {
++		t.Fatal("oversize DNS request retained pending state")
++	}
++}
++
++func TestPrimaryDNSDoesNotFallBackWithoutNegotiatedEndpoint(t *testing.T) {
++	conn := &packetConn{opts: testOptions(), g: &generation{}}
++	query := new(dns.Msg)
++	query.SetQuestion("missing-dns.example.test.", dns.TypeA)
++	wire, err := query.Pack()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := conn.WriteTo(wire, &net.UDPAddr{IP: net.IPv4(8, 8, 8, 8), Port: 53}); err == nil {
++		t.Fatal("primary silently used a resolver not supplied by the node")
++	}
++}

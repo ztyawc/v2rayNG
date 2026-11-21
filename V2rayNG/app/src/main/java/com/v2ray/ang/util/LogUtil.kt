@@ -4,6 +4,7 @@ import android.util.Log
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.handler.MmkvManager
 import java.util.Locale
+import java.util.IdentityHashMap
 
 object LogUtil {
 
@@ -54,15 +55,30 @@ object LogUtil {
 
     private fun log(priority: Int, tag: String, message: String, throwable: Throwable? = null) {
         if (!isEnabled(priority)) return
+        val safeThrowable = throwable?.let(::sanitizedThrowable)
 
         when {
             throwable == null -> Log.println(priority, tag, message)
-            priority >= Log.ERROR -> Log.e(tag, message, throwable)
-            priority == Log.WARN -> Log.w(tag, message, throwable)
-            priority == Log.INFO -> Log.i(tag, message, throwable)
-            priority == Log.DEBUG -> Log.d(tag, message, throwable)
-            else -> Log.v(tag, message, throwable)
+            priority >= Log.ERROR -> Log.e(tag, message, safeThrowable)
+            priority == Log.WARN -> Log.w(tag, message, safeThrowable)
+            priority == Log.INFO -> Log.i(tag, message, safeThrowable)
+            priority == Log.DEBUG -> Log.d(tag, message, safeThrowable)
+            else -> Log.v(tag, message, safeThrowable)
         }
+    }
+
+    /** Parser/network/native exception messages can contain credentials or config fragments. */
+    internal fun sanitizedThrowable(source: Throwable): Throwable {
+        val visited = IdentityHashMap<Throwable, Throwable>()
+        fun copy(error: Throwable): Throwable {
+            visited[error]?.let { return it }
+            val safe = Throwable(error.javaClass.name).apply { stackTrace = error.stackTrace }
+            visited[error] = safe
+            error.cause?.takeIf { it !in visited }?.let { safe.initCause(copy(it)) }
+            error.suppressed.filter { it !in visited }.forEach { safe.addSuppressed(copy(it)) }
+            return safe
+        }
+        return copy(source)
     }
 
     fun d(tag: String = AppConfig.TAG, message: String) = log(Log.DEBUG, tag, message)
@@ -75,4 +91,3 @@ object LogUtil {
     fun w(tag: String = AppConfig.TAG, message: String, throwable: Throwable) = log(Log.WARN, tag, message, throwable)
     fun e(tag: String = AppConfig.TAG, message: String, throwable: Throwable) = log(Log.ERROR, tag, message, throwable)
 }
-

@@ -46,6 +46,7 @@ object TrojanFmt : FmtBase() {
      */
     fun toUri(config: ProfileItem): String {
         val dicQuery = getQueryDic(config)
+        dicQuery["security"] = config.security?.takeIf { it.isNotBlank() } ?: "none"
 
         return toUri(config, config.password, dicQuery)
     }

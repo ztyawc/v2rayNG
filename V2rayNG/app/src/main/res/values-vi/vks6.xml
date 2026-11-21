@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_vks6">VK S6 (TCP)</string>
+    <string name="menu_item_import_config_manually_vks6">Nhập thủ công [VK S6]</string>
+    <string name="vks6_port_end">Cổng cuối của nút (tùy chọn)</string>
+    <string name="vks6_username">Tên người dùng phiên</string>
+    <string name="vks6_password">Mật khẩu phiên</string>
+    <string name="vks6_hint">Chỉ TCP/IPv4. Nhập nút và thông tin xác thực từ phiên VK hiện tại. Để trống cổng cuối để dùng cổng cố định.</string>
+    <string name="vks6_invalid_config">Nhập ghi chú, nút IPv4 hợp lệ, các cổng 1–65535 theo thứ tự tăng dần và thông tin xác thực phiên dài 1–255 byte UTF-8 mỗi mục.</string>
+</resources>

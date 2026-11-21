@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_vks6">VK S6 (TCP)</string>
+    <string name="menu_item_import_config_manually_vks6">Ввести вручную [VK S6]</string>
+    <string name="vks6_port_end">Последний порт узла (необязательно)</string>
+    <string name="vks6_username">Имя пользователя сеанса</string>
+    <string name="vks6_password">Пароль сеанса</string>
+    <string name="vks6_hint">Только TCP/IPv4. Введите узел и данные текущего сеанса VK. Для фиксированного порта оставьте последний порт пустым.</string>
+    <string name="vks6_invalid_config">Введите примечание, допустимый IPv4 узла, порты 1–65535 по возрастанию и данные сеанса длиной 1–255 байт UTF-8 каждое.</string>
+</resources>
