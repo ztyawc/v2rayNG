@@ -59,7 +59,7 @@ interface MainDataSource : Closeable {
     fun sendMsg2Service(msgId: Int, content: String)
     fun sendMsg2TestService(msg: TestServiceMessage)
     fun cancelAllPing()
-    fun testCurrentServerRealPing()
+    fun testCurrentServerRealPing(requestId: String = "")
 
     fun syncSubscriptions()
     fun initAssets()

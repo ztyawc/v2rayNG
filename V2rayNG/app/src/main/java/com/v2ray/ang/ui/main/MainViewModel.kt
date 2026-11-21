@@ -40,6 +40,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.util.regex.PatternSyntaxException
 
 class MainViewModel(
@@ -83,6 +84,9 @@ class MainViewModel(
 
     @Volatile
     private var testingGroupId: String? = null
+    @Volatile
+    private var currentDelayRequestId: String? = null
+    private val delayRequestCounter = AtomicLong()
 
     private val initialPageReady = CompletableDeferred<Unit>()
 
@@ -116,7 +120,27 @@ class MainViewModel(
 
             MainServiceEvent.StateStopSuccess -> updateRunningState(false)
             is MainServiceEvent.MeasureDelayResult -> {
+                if (!uiState.value.isRunning) return
+                val activeId = currentDelayRequestId
+                if (event.requestId.isNotEmpty()) {
+                    if (event.requestId != activeId) return
+                } else if (activeId != null) {
+                    return
+                }
                 _uiState.update { it.copy(status = MainStatus.ConnectionTest(event.result)) }
+            }
+
+            is MainServiceEvent.MeasureDelayCancelled -> {
+                val activeId = currentDelayRequestId ?: return
+                if (event.requestId.isNotEmpty() && event.requestId != activeId) return
+                currentDelayRequestId = null
+                _uiState.update { state ->
+                    if (state.status == MainStatus.Testing) {
+                        state.copy(status = if (state.isRunning) MainStatus.Connected else MainStatus.Disconnected)
+                    } else {
+                        state
+                    }
+                }
             }
 
             is MainServiceEvent.MeasureConfigSuccess -> {
@@ -760,6 +784,7 @@ class MainViewModel(
 
     // ---------- Testing ----------
     fun cancelAllPing() {
+        currentDelayRequestId = null
         dataSource.cancelAllPing()
         testingGroupId = null
         _uiState.update {
@@ -813,8 +838,11 @@ class MainViewModel(
     }
 
     fun testCurrentServerRealPing() {
+        if (!uiState.value.isRunning) return
+        val requestId = "delay-${delayRequestCounter.incrementAndGet()}"
+        currentDelayRequestId = requestId
         _uiState.update { it.copy(status = MainStatus.Testing) }
-        dataSource.testCurrentServerRealPing()
+        dataSource.testCurrentServerRealPing(requestId)
     }
 
     private fun onTestsFinished() {
@@ -854,6 +882,9 @@ class MainViewModel(
 
     // ---------- Running state ----------
     private fun updateRunningState(running: Boolean, clearTestingText: Boolean = true) {
+        if (!running || clearTestingText) {
+            currentDelayRequestId = null
+        }
         _uiState.update { state ->
             state.copy(
                 isRunning = running,

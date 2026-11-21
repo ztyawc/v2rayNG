@@ -40,6 +40,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
@@ -48,6 +49,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.io.IOException
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
@@ -105,6 +107,11 @@ object CoreServiceManager {
         private var workers = SupervisorJob(owner)
         var workScope = CoroutineScope(workers + Dispatchers.IO)
             private set
+        // Child of owner so session teardown cancels it, but separate from workers so
+        // stop/restart never waits on an unreachable probe before closing the core.
+        private val connectionTests = SupervisorJob(owner)
+        private val connectionTestScope = CoroutineScope(connectionTests + Dispatchers.IO)
+        private val activeTestRequestId = AtomicReference<String?>(null)
         private var commandJob: Job? = null
         private var stopJob: Job? = null
         private var ownsResources = false
@@ -168,10 +175,16 @@ object CoreServiceManager {
             val token = lifecycle.restart() ?: return
             networkMonitor?.unregister()
             networkMonitor = null
+            val cancelledTestId = activeTestRequestId.getAndSet(null)
+            connectionTests.cancelChildren()
             commandJob?.cancel()
             workers.cancel()
             commandJob = scope.launch {
                 try {
+                    cancelNativeDelayMeasure()
+                    if (cancelledTestId != null) {
+                        MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_CANCEL, "", cancelledTestId)
+                    }
                     workers.join()
                     nativeMutex.withLock { cleanup(keepForeground = true) }
                     ensureActive()
@@ -218,9 +231,12 @@ object CoreServiceManager {
             // Invalidate commands before cancellation can resume blocked native/root work.
             networkMonitor?.unregister()
             networkMonitor = null
+            activeTestRequestId.set(null)
+            connectionTests.cancel()
             commandJob?.cancel()
             workers.cancel()
             stopJob = scope.launch {
+                cancelNativeDelayMeasure()
                 commandJob?.join()
                 workers.join()
                 try {
@@ -274,6 +290,88 @@ object CoreServiceManager {
                 val running = canReload(generation()) && isRunning()
                 MessageHelper.sendMsg2UI(service,
                     if (running) AppConfig.MSG_STATE_RUNNING else AppConfig.MSG_STATE_NOT_RUNNING, "")
+            }
+        }
+
+        fun cancelConnectionTests(notifyUi: Boolean) {
+            val cancelledId = activeTestRequestId.getAndSet(null)
+            connectionTests.cancelChildren()
+            scope.launch {
+                cancelNativeDelayMeasure()
+                if (notifyUi && cancelledId != null) {
+                    MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_CANCEL, "", cancelledId)
+                }
+            }
+        }
+
+        fun measureDelay(requestId: String) {
+            val token = generation()
+            if (!canReload(token) || !isRunning()) {
+                MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_CANCEL, "", requestId)
+                return
+            }
+            activeTestRequestId.set(requestId)
+            connectionTests.cancelChildren()
+            connectionTestScope.launch {
+                var time = -1L
+                var primaryError: Throwable? = null
+                val primaryUrl = SettingsManager.getDelayTestUrl()
+                val startNanos = System.nanoTime()
+
+                try {
+                    time = coreController.measureDelay(primaryUrl)
+                } catch (e: Exception) {
+                    primaryError = e
+                    LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=measure guid=${MmkvManager.getSelectServer()} failed", IOException(e.javaClass.simpleName))
+                }
+                val primaryElapsedMs = (System.nanoTime() - startNanos) / 1_000_000L
+
+                ensureActive()
+                if (!canReload(token) || activeTestRequestId.get() != requestId || !isRunning()) return@launch
+
+                var finalError: Throwable? = primaryError
+                val fallbackUrl = SettingsManager.getDelayTestUrl(true)
+                if (ConnectionDelayProbe.shouldTryFallback(primaryUrl, fallbackUrl, time, primaryElapsedMs, primaryError)) {
+                    try {
+                        time = coreController.measureDelay(fallbackUrl)
+                        if (time >= 0L) finalError = null
+                    } catch (e: Exception) {
+                        finalError = e
+                        LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=measure-fallback guid=${MmkvManager.getSelectServer()} failed", IOException(e.javaClass.simpleName))
+                    }
+                }
+
+                ensureActive()
+                if (!canReload(token) || activeTestRequestId.get() != requestId || !isRunning()) return@launch
+
+                val errorStr = if (time >= 0L) "" else ConnectionDelayProbe.extractErrorMessage(finalError)
+                val initialResult = ConnectionTestResult(
+                    delayMillis = time,
+                    errorMessage = errorStr,
+                    country = null,
+                    ipAddress = null,
+                )
+                MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_RESULT, initialResult, requestId)
+
+                if (time >= 0L) {
+                    val endpoint = SpeedtestManager.getRemoteIPInfo()
+                    ensureActive()
+                    if (endpoint != null &&
+                        (endpoint.country != null || endpoint.ipAddress != null) &&
+                        canReload(token) &&
+                        activeTestRequestId.get() == requestId &&
+                        isRunning()
+                    ) {
+                        val fullResult = ConnectionTestResult(
+                            delayMillis = time,
+                            errorMessage = "",
+                            country = endpoint.country,
+                            ipAddress = endpoint.ipAddress,
+                        )
+                        MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_RESULT, fullResult, requestId)
+                    }
+                }
+                activeTestRequestId.compareAndSet(requestId, null)
             }
         }
     }
@@ -427,6 +525,7 @@ object CoreServiceManager {
                 val service = getService() ?: return@withLock
                 val descriptor = currentVpnInterface
                 try {
+                    session.cancelConnectionTests(notifyUi = true)
                     NotificationManager.stopSpeedNotification()
                     synchronized(nativeAccess) { coreController.stopLoop() }
                     ensureActive()
@@ -480,42 +579,12 @@ object CoreServiceManager {
         return result
     }
 
-    /**
-     * Measures the connection delay for the current V2Ray configuration.
-     * Tests with primary URL first, then falls back to alternative URL if needed.
-     * Also fetches remote IP information if the delay test was successful.
-     */
-    private fun measureV2rayDelay() {
-        if (!isRunning()) {
-            return
-        }
-
-        workScope?.launch {
-            val service = getService() ?: return@launch
-            var time = -1L
-            val errorStr = ""
-
-            try {
-                time = coreController.measureDelay(SettingsManager.getDelayTestUrl())
-            } catch (e: Exception) {
-                LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=measure guid=${MmkvManager.getSelectServer()} failed", IOException(e.javaClass.simpleName))
-            }
-            if (time == -1L) {
-                try {
-                    time = coreController.measureDelay(SettingsManager.getDelayTestUrl(true))
-                } catch (e: Exception) {
-                    LogUtil.e(AppConfig.TAG, "Service mode=${service.javaClass.simpleName} phase=measure-fallback guid=${MmkvManager.getSelectServer()} failed", IOException(e.javaClass.simpleName))
-                }
-            }
-
-            val endpoint = if (time >= 0) SpeedtestManager.getRemoteIPInfo() else null
-            val result = ConnectionTestResult(
-                delayMillis = time,
-                errorMessage = errorStr,
-                country = endpoint?.country,
-                ipAddress = endpoint?.ipAddress,
-            )
-            MessageHelper.sendMsg2UI(service, AppConfig.MSG_MEASURE_DELAY_RESULT, result)
+    private fun cancelNativeDelayMeasure() {
+        if (!::coreController.isInitialized) return
+        try {
+            coreController.cancelMeasureDelay()
+        } catch (e: Exception) {
+            LogUtil.w(AppConfig.TAG, "Failed to cancel native delay probe", IOException(e.javaClass.simpleName))
         }
     }
 
@@ -640,7 +709,11 @@ object CoreServiceManager {
                 }
 
                 AppConfig.MSG_MEASURE_DELAY -> {
-                    measureV2rayDelay()
+                    activeSession?.measureDelay(intent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID).orEmpty())
+                }
+
+                AppConfig.MSG_MEASURE_DELAY_CANCEL -> {
+                    activeSession?.cancelConnectionTests(notifyUi = true)
                 }
             }
 

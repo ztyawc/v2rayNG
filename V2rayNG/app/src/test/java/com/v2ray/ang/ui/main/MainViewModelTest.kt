@@ -3,6 +3,7 @@ package com.v2ray.ang.ui.main
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.v2ray.ang.AngApplication
+import com.v2ray.ang.dto.ConnectionTestResult
 import com.v2ray.ang.dto.entities.ProfileItem
 import com.v2ray.ang.dto.entities.ServerAffiliationInfo
 import com.v2ray.ang.dto.entities.SubscriptionCache
@@ -158,5 +159,70 @@ class MainViewModelTest {
             assertTrue(model.serverGroupState("group").value.servers.isEmpty())
             verify(model).toastError(any<Int>())
         } finally { level.setInt(LogUtil, previous); model.viewModelScope.cancel(); Dispatchers.resetMain() }
+    }
+
+    @Test fun currentServerDelayAcceptsProgressiveUpdatesAndRejectsStaleOrStoppedReplies() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        val source = mock<MainDataSource>()
+        val events = MutableSharedFlow<MainServiceEvent>(extraBufferCapacity = 8)
+        whenever(source.mainServiceEvent).thenReturn(events)
+        whenever(source.getSelectedSubscriptionId()).thenReturn("group")
+        whenever(source.getSubscriptions()).thenReturn(listOf(SubscriptionCache("group", SubscriptionItem(remarks = "Group"))))
+        whenever(source.getServerGuidList("group")).thenReturn(emptyList())
+        val model = MainViewModel(mock<AngApplication>(), source, SavedStateHandle(), dispatcher, dispatcher)
+        try {
+            advanceUntilIdle()
+            model.testCurrentServerRealPing()
+            verify(source, never()).testCurrentServerRealPing(any())
+
+            events.emit(MainServiceEvent.StateRunning)
+            advanceUntilIdle()
+            assertEquals(MainStatus.Connected, model.uiState.value.status)
+
+            val requestIds = mutableListOf<String>()
+            whenever(source.testCurrentServerRealPing(any())).thenAnswer {
+                requestIds += it.getArgument<String>(0)
+                Unit
+            }
+
+            model.testCurrentServerRealPing()
+            assertEquals(MainStatus.Testing, model.uiState.value.status)
+            assertEquals(1, requestIds.size)
+
+            model.testCurrentServerRealPing()
+            assertEquals(2, requestIds.size)
+            val staleId = requestIds[0]
+            val activeId = requestIds[1]
+
+            events.emit(MainServiceEvent.MeasureDelayResult(ConnectionTestResult(delayMillis = -1, errorMessage = "timeout"), staleId))
+            events.emit(MainServiceEvent.MeasureDelayCancelled(staleId))
+            advanceUntilIdle()
+            assertEquals(MainStatus.Testing, model.uiState.value.status)
+
+            val initial = ConnectionTestResult(delayMillis = 68, errorMessage = "")
+            events.emit(MainServiceEvent.MeasureDelayResult(initial, activeId))
+            advanceUntilIdle()
+            assertEquals(MainStatus.ConnectionTest(initial), model.uiState.value.status)
+
+            val enriched = ConnectionTestResult(delayMillis = 68, errorMessage = "", country = "HK", ipAddress = "198.51.100.8")
+            events.emit(MainServiceEvent.MeasureDelayResult(enriched, activeId))
+            advanceUntilIdle()
+            assertEquals(MainStatus.ConnectionTest(enriched), model.uiState.value.status)
+
+            model.testCurrentServerRealPing()
+            val cancelId = requestIds[2]
+            assertEquals(MainStatus.Testing, model.uiState.value.status)
+            events.emit(MainServiceEvent.MeasureDelayCancelled(cancelId))
+            advanceUntilIdle()
+            assertEquals(MainStatus.Connected, model.uiState.value.status)
+
+            model.testCurrentServerRealPing()
+            val stopId = requestIds[3]
+            events.emit(MainServiceEvent.StateStopSuccess)
+            events.emit(MainServiceEvent.MeasureDelayResult(ConnectionTestResult(delayMillis = 50), stopId))
+            advanceUntilIdle()
+            assertEquals(MainStatus.Disconnected, model.uiState.value.status)
+        } finally { model.viewModelScope.cancel(); Dispatchers.resetMain() }
     }
 }

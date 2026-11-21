@@ -59,7 +59,16 @@ class MainRepository(
                 AppConfig.MSG_STATE_STOP_SUCCESS -> MainServiceEvent.StateStopSuccess
                 AppConfig.MSG_MEASURE_DELAY_RESULT -> safeIntent
                     .serializable<ConnectionTestResult>("content")
-                    ?.let { MainServiceEvent.MeasureDelayResult(it) }
+                    ?.let {
+                        MainServiceEvent.MeasureDelayResult(
+                            result = it,
+                            requestId = safeIntent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID).orEmpty(),
+                        )
+                    }
+
+                AppConfig.MSG_MEASURE_DELAY_CANCEL -> MainServiceEvent.MeasureDelayCancelled(
+                    safeIntent.getStringExtra(MessageHelper.EXTRA_REQUEST_ID).orEmpty()
+                )
 
                 AppConfig.MSG_MEASURE_CONFIG_SUCCESS -> MainServiceEvent.MeasureConfigSuccess(safeIntent.getStringExtra("content").orEmpty())
                 AppConfig.MSG_MEASURE_CONFIG_NOTIFY -> MainServiceEvent.MeasureConfigNotify(
@@ -209,13 +218,14 @@ class MainRepository(
         MessageHelper.sendMsg2TestService(app, msg)
 
     override fun cancelAllPing() {
+        MessageHelper.sendMsg2Service(app, AppConfig.MSG_MEASURE_DELAY_CANCEL, "")
         sendMsg2TestService(
             TestServiceMessage(key = AppConfig.MSG_MEASURE_CONFIG_CANCEL)
         )
     }
 
-    override fun testCurrentServerRealPing() {
-        sendMsg2Service(AppConfig.MSG_MEASURE_DELAY, "")
+    override fun testCurrentServerRealPing(requestId: String) {
+        MessageHelper.sendMsg2Service(app, AppConfig.MSG_MEASURE_DELAY, "", requestId)
     }
 
     override fun syncSubscriptions() {

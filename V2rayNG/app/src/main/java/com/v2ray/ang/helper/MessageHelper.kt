@@ -16,7 +16,7 @@ import com.v2ray.ang.util.LogUtil
 import java.io.Serializable
 
 object MessageHelper {
-
+    const val EXTRA_REQUEST_ID = "requestId"
 
     /**
      * Sends a message to the service.
@@ -25,8 +25,8 @@ object MessageHelper {
      * @param what The message identifier.
      * @param content The message content.
      */
-    fun sendMsg2Service(ctx: Context, what: Int, content: Serializable) {
-        sendMsg(ctx, AppConfig.BROADCAST_ACTION_SERVICE, what, content)
+    fun sendMsg2Service(ctx: Context, what: Int, content: Serializable, requestId: String = "") {
+        sendMsg(ctx, AppConfig.BROADCAST_ACTION_SERVICE, what, content, requestId)
     }
 
     /**
@@ -67,8 +67,8 @@ object MessageHelper {
      * @param what The message identifier.
      * @param content The message content.
      */
-    fun sendMsg2UI(ctx: Context, what: Int, content: Serializable) {
-        sendMsg(ctx, AppConfig.BROADCAST_ACTION_ACTIVITY, what, content)
+    fun sendMsg2UI(ctx: Context, what: Int, content: Serializable, requestId: String = "") {
+        sendMsg(ctx, AppConfig.BROADCAST_ACTION_ACTIVITY, what, content, requestId)
     }
 
     /**
@@ -146,18 +146,21 @@ object MessageHelper {
      * @param what The message identifier.
      * @param content The message content.
      */
-    private fun sendMsg(ctx: Context, action: String, what: Int, content: Serializable) {
+    private fun sendMsg(ctx: Context, action: String, what: Int, content: Serializable, requestId: String = "") {
         try {
-            ctx.sendBroadcast(messageIntent(action, what, content))
+            ctx.sendBroadcast(messageIntent(action, what, content, requestId))
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "Failed to send message with action: $action", e)
         }
     }
 
-    private fun messageIntent(action: String, what: Int, content: Serializable): Intent =
+    private fun messageIntent(action: String, what: Int, content: Serializable, requestId: String = ""): Intent =
         Intent(action).apply {
             `package` = AppConfig.ANG_PACKAGE
             putExtra("key", what)
             putExtra("content", content)
+            if (requestId.isNotEmpty()) {
+                putExtra(EXTRA_REQUEST_ID, requestId)
+            }
         }
 }
